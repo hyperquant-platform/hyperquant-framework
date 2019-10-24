@@ -1,0 +1,11 @@
+__pycache__
+.idea*
+venv
+.venv
+example_*
+*_private*
+local_settings.py
+*.egg-info
+env.py
+.pre-commit-config.yaml
+pytest.ini
