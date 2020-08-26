@@ -1,20 +1,19 @@
-import json
+import logging
 import logging
 import time
-from collections import Iterable
 from decimal import Decimal
 from unittest import TestCase
 
-
-from hyperquant.api import (CandleInterval, Direction, Endpoint,
-                            OrderBookDirection, OrderStatus, OrderType,
-                            Platform, TransactionType, convert_items_to_obj,
-                            item_format_by_endpoint)
-from hyperquant.clients import (Account, Balance, BalanceTransaction, Candle,
-                                ItemObject, MyTrade, Order, OrderBook,
-                                OrderBookItem, Position, ProtocolConverter,
-                                Quote, Ticker, Trade)
-from hyperquant.utils import dict_util
+from hyperquant.api import (
+    CandleInterval, Direction, OrderBookDirection, OrderStatus, OrderType,
+    Platform, TransactionType,
+)
+from hyperquant.clients import (
+    Account, Balance, BalanceTransaction, Candle,
+    ItemObject, MyTrade, Order, OrderBook,
+    OrderBookItem, Position, ProtocolConverter,
+    Quote, Ticker, Trade,
+)
 
 
 def wait_for(value_or_callable, min_count=2, timeout_sec=10.):
@@ -253,12 +252,14 @@ class APITestCase(TestCase):
             self.assertIsInstance(my_trade.fee, Decimal)
         if my_trade.rebate is not None:
             self.assertIsInstance(my_trade.rebate, Decimal)
+        if my_trade.fee_currency is not None:
+            self.assertIsInstance(my_trade.fee_currency, str)
 
         # Value
         if my_trade.fee is not None:
-            self.assertGreater(my_trade.fee, 0)
+            self.assertGreaterEqual(my_trade.fee, 0)
         if my_trade.rebate is not None:
-            self.assertGreater(my_trade.rebate, 0)
+            self.assertGreaterEqual(my_trade.rebate, 0)
 
     def assertCandleIsValid(self,
                             candle,
@@ -489,7 +490,7 @@ class APITestCase(TestCase):
         if order_book_item.orders_count is not None:
             self.assertGreaterEqual(order_book_item.orders_count, 0)
 
-    def assertAccountIsValid(self, account, platform_id=None, is_dict=False):
+    def assertAccountIsValid(self, account, platform_id=None, is_dict=False, has_timestamp=True):
         if is_dict and account:
             account = Account(**account)
 
@@ -507,9 +508,10 @@ class APITestCase(TestCase):
 
         # Value
         self.assertEqual(account.platform_id, platform_id)
-        self.assertGreater(account.timestamp, 1000000000)
-        if account.is_milliseconds:
-            self.assertGreater(account.timestamp, 10000000000)
+        if has_timestamp:
+            self.assertGreater(account.timestamp, 1000000000)
+            if account.is_milliseconds:
+                self.assertGreater(account.timestamp, 10000000000)
         # self.assertGreaterEqual(len(account.balances), 0)
         # for balance in account.balances:
         #     APITestCase.assertBalanceIsValid(self, balance, platform_id)
@@ -536,6 +538,8 @@ class APITestCase(TestCase):
         self.assertIsInstance(balance.amount_available, Decimal)
         if balance.amount_reserved is not None:
             self.assertIsInstance(balance.amount_reserved, Decimal)
+        if balance.pnl is not None:
+            self.assertIsInstance(balance.pnl, Decimal)
 
         # Value
         if platform_id:
@@ -559,6 +563,10 @@ class APITestCase(TestCase):
         self.assertIsNotNone(transaction.symbol)
         self.assertIsNotNone(transaction.transaction_type)
         self.assertIsNotNone(transaction.amount)
+        if transaction.transaction_type in (TransactionType.REALISED_PNL, TransactionType.FUNDING):
+            self.assertIsNotNone(transaction.currency_pair)
+        if transaction.currency_pair is not None:
+            self.assertLessEqual(len(transaction.currency_pair), 30)
         # self.assertIsNotNone(transaction.fee)
 
         # Type
@@ -701,8 +709,11 @@ class APITestCase(TestCase):
         # Not empty
         self.assertIsNotNone(position.platform_id)
         self.assertIsNotNone(position.symbol)
+        # Failed on empty positions
         self.assertIsNotNone(position.amount, position)
         # self.assertIsNotNone(position.direction)
+        if position.is_open:
+            self.assertIsNotNone(position.pnl)
 
         # Type
         self.assertIsInstance(position.platform_id, int)
@@ -710,6 +721,8 @@ class APITestCase(TestCase):
         self.assertIsInstance(position.amount, Decimal)
         if position.direction is not None:
             self.assertIsInstance(position.direction, int)
+        if position.pnl is not None:
+            self.assertIsInstance(position.pnl, Decimal)
 
         # Value
         if platform_id:
@@ -718,7 +731,7 @@ class APITestCase(TestCase):
         if testing_symbol_or_symbols:
             self.assertEqual(position.symbol,
                              testing_symbol_or_symbols.upper())
-        self.assertGreaterEqual(position.amount, 0)
+        # self.assertGreaterEqual(position.amount, 0)
         if position.direction is not None:
             self.assertIn(position.direction, Direction.name_by_value)
             self.assertEqual(position.is_buy + position.is_sell, 1)

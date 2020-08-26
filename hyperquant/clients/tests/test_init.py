@@ -4,9 +4,10 @@ import logging
 import time
 from datetime import datetime, timezone
 from decimal import Decimal
+from typing import List, Union
 from unittest import TestCase
-
 from unittest.mock import Mock
+
 from websocket import ABNF
 
 from hyperquant.api import (
@@ -22,6 +23,7 @@ from hyperquant.api import (
     TransactionType,
 )
 from hyperquant.clients import (
+    Balance,
     Candle,
     DataObject,
     Endpoint,
@@ -41,11 +43,10 @@ from hyperquant.clients.tests.utils import (
     create_test_order,
     delete_all_test_orders,
     set_up_logging,
-)
+    close_all_positions)
 from hyperquant.clients.utils import create_rest_client, create_ws_client
 from hyperquant.utils import time_util
 from hyperquant.utils.test_util import APITestCase
-
 
 set_up_logging()
 
@@ -315,10 +316,23 @@ class TestClient(TestCase):
     # To prevent rate limit
     sleep_between_tests_sec = 0
 
+    @classmethod
+    def setUpClass(cls):
+        super().setUpClass()
+        if cls.is_rest:
+            cls.client = create_rest_client(cls.platform_id, version=cls.version)
+            cls.client_authed = create_rest_client(
+                cls.platform_id, True, cls.version, pivot_symbol=cls.pivot_symbol
+            )
+        else:
+            cls.client = create_ws_client(cls.platform_id, version=cls.version)
+            cls.client_authed = create_ws_client(
+                cls.platform_id, True, cls.version, pivot_symbol=cls.pivot_symbol
+            )
+
     def setUp(self):
         self.skipIfBase()
         super().setUp()
-
         if self.is_rest:
             self.client = create_rest_client(self.platform_id, version=self.version)
             self.client_authed = create_rest_client(
@@ -329,7 +343,6 @@ class TestClient(TestCase):
             self.client_authed = create_ws_client(
                 self.platform_id, True, self.version, pivot_symbol=self.pivot_symbol
             )
-
         time.sleep(self.sleep_between_tests_sec)
 
     def tearDown(self):
@@ -466,8 +479,8 @@ class TestClient(TestCase):
     #
     #     APITestCase.assertOrderBookItemIsValid(self, order_book_item, testing_symbol_or_symbols, self.platform_id)
 
-    def assertAccountIsValid(self, account):
-        APITestCase.assertAccountIsValid(self, account, self.platform_id)
+    def assertAccountIsValid(self, account, **kwargs):
+        APITestCase.assertAccountIsValid(self, account, self.platform_id, **kwargs)
 
     def assertBalanceIsValid(self, balance):
         APITestCase.assertBalanceIsValid(self, balance, self.platform_id)
@@ -525,8 +538,8 @@ class TestRESTConverter(TestProtocolConverter):
             for i in range(10)
         ]
         item_trades = [Trade(**item) for item in item_dicts]
-        from_item = ItemObject(**item_dicts[2])
-        to_item = ItemObject(**item_dicts[8])
+        from_item = Trade(**item_dicts[2])
+        to_item = Trade(**item_dicts[8])
 
         result = self.converter._filter_result(
             item_trades, from_item, to_item, timestamp_ms, timestamp_ms
@@ -590,7 +603,7 @@ class BaseTestRESTClient(TestClient):
     is_symbol_case_sensitive = True  # todo remove
     # todo remove and make common behavior for all platforms
     is_possible_fetch_my_trades_without_symbols = False
-
+    is_market_orders_possible_to_cancel = True
     is_rate_limit_error = False
 
     @classmethod
@@ -978,7 +991,25 @@ class TestPlatformRESTClientCommon(BaseTestRESTClient):
         self.assertGoodResult(result, False)
         self.assertOrderBookIsValid(result)
 
-        # todo test limit and is_use_max_limit
+        medium_depth = client.converter.param_value_lookup[ParamName.LEVEL][OrderBookDepthLevel.MEDIUM]
+
+        result = client.fetch_order_book(self.testing_symbol, limit=OrderBookDepthLevel.MEDIUM)
+        self.assertGoodResult(result, False)
+        self.assertOrderBookIsValid(result)
+        self.assertEqual(len(result.bids), medium_depth)
+
+        max_depth = client.converter.param_value_lookup[ParamName.LEVEL][OrderBookDepthLevel.DEEPEST]
+
+        result = client.fetch_order_book(self.testing_symbol, limit=OrderBookDepthLevel.DEEPEST)
+        self.assertGoodResult(result, False)
+        self.assertOrderBookIsValid(result)
+        if not max_depth:
+            # Bitmex not return exact value
+            self.assertGreaterEqual(len(result.bids), 1000)
+        else:
+            # Order book can be not filled on full depth
+            self.assertGreaterEqual(len(result.bids), max_depth*0.5)
+
 
     def test_fetch_quote(self):
         client = self.client
@@ -1087,11 +1118,6 @@ class TestPlatformRESTClientPrivate(BaseTestRESTClient):
         return self.get_order_buy_limit_params(self.testing_order_symbol)
 
     def get_order_buy_limit_params(self, symbol=None, amount=None):
-        current_market_price = (
-            self.current_market_price_by_symbol.get(symbol)
-            if self.current_market_price_by_symbol
-            else None
-        )
         current_market_price = self.orderbook[symbol].bids[-1].price
         if not amount:
             amount = SingleDataAggregator().get_symbol_min_amount(
@@ -1161,13 +1187,21 @@ class TestPlatformRESTClientPrivate(BaseTestRESTClient):
     # (Stop tests if price is bad)
     # is_stop_order_placing = False
     order_with_bad_price = None
-    account = None
-    balances = None
-    orderbook = None
 
     @classmethod
     def setUpClass(cls):
         super().setUpClass()
+        if cls.client_authed:
+            cls.account = cls.client_authed.get_account_info()
+            cls.balances = cls.client_authed.fetch_balance()
+            cls.orderbook = {
+                cls.testing_order_symbol: cls.client_authed.fetch_order_book(
+                    cls.testing_order_symbol, limit=OrderBookDepthLevel.MEDIUM,
+                ),
+                cls.testing_order_symbol2: cls.client_authed.fetch_order_book(
+                    cls.testing_order_symbol2
+                ),
+            }
         # (Reset)
         # TestPlatformRESTClientPrivate.is_stop_order_placing = False
         cls.order_with_bad_price = None
@@ -1221,16 +1255,6 @@ class TestPlatformRESTClientPrivate(BaseTestRESTClient):
 
         self.wait_before_fetch_s = self.client_authed.wait_before_fetch_s
 
-        self.account = self.client_authed.get_account_info()
-        self.balances = self.client_authed.fetch_balance()
-        self.orderbook = {
-            self.testing_order_symbol: self.client_authed.fetch_order_book(
-                self.testing_order_symbol
-            ),
-            self.testing_order_symbol2: self.client_authed.fetch_order_book(
-                self.testing_order_symbol2
-            ),
-        }
         logging.info(f"\n\nAccount: {self.account}")
         logging.info(f"Balance (10 first): {self.balances[:10]}")
         if self.is_support_fetch_orders_without_symbol:
@@ -1260,7 +1284,7 @@ class TestPlatformRESTClientPrivate(BaseTestRESTClient):
         logging.info(
             "\n\nCanceling created orders on tear down %s", self.created_orders
         )
-        if self.created_orders:
+        if self.created_orders and self.is_market_orders_possible_to_cancel:
             for item in self.created_orders:
                 result = self.client_authed.cancel_order(item)
                 self.assertTrue(
@@ -1555,13 +1579,15 @@ class TestPlatformRESTClientPrivate(BaseTestRESTClient):
 
         # Good
 
-        # Empty params
+        self._create_position(self.testing_symbol)
         # Full params
-        result = client.fetch_balance()
+        result: Union[List[Balance], Error] = client.fetch_balance()
+        client.close_all_positions()
 
         self.assertGoodResult(result, message="Maybe account has no funds.")
         for balance in result:
             self.assertBalanceIsValid(balance)
+            self.assertIsNotNone(balance.pnl)
         # Check repetitions
         symbols_returned = [balance.symbol for balance in result]
         self.assertEqual(
@@ -1572,13 +1598,6 @@ class TestPlatformRESTClientPrivate(BaseTestRESTClient):
 
     def test_fetch_balance_transactions(self):
         client = self.client_authed
-
-        if self.platform_id != Platform.BITMEX:
-            self.skipTest("Implemented only for BitMEX")
-
-        # Error
-
-        # Good
 
         # Empty params
         result = client.fetch_balance_transactions()
@@ -1609,6 +1628,8 @@ class TestPlatformRESTClientPrivate(BaseTestRESTClient):
         # result = 1
         while result:
             result = client.fetch_balance_transactions(1000, page)
+            for item in result:
+                self.assertBalanceTransactionIsValid(item)
             if not isinstance(result, list):
                 break
             page += 1
@@ -1619,12 +1640,12 @@ class TestPlatformRESTClientPrivate(BaseTestRESTClient):
         #
         # self.assertEqual(result20_1, result10_2 + result10_3)
 
-        # is_only_by_user
+        # is_direct
         result = client.fetch_balance_transactions()
         transaction_types = [item.transaction_type for item in result]
         self.assertIn(TransactionType.REALISED_PNL, transaction_types)
 
-        result = client.fetch_balance_transactions(is_only_by_user=True)
+        result = client.fetch_balance_transactions(is_direct=True)
         transaction_types = [item.transaction_type for item in result]
         self.assertNotIn(TransactionType.REALISED_PNL, transaction_types)
 
@@ -1645,7 +1666,8 @@ class TestPlatformRESTClientPrivate(BaseTestRESTClient):
 
         # Full params
         result = client.fetch_my_trades(self.testing_symbol)
-        result2 = client.fetch_my_trades("ETHUSD")
+        if self.testing_symbol2:
+            result2 = client.fetch_my_trades(self.testing_symbol2)
 
         NO_ITEMS_FOR_ACCOUNT = True
         self.assertGoodResult(result, not NO_ITEMS_FOR_ACCOUNT)
@@ -1694,29 +1716,30 @@ class TestPlatformRESTClientPrivate(BaseTestRESTClient):
             )
 
             self.assertGoodResult(result, is_iterable=False)
-            cancel_result = client.cancel_order(
-                result
-            )  # May be already filled (then "result" will be returned)
+            if self.is_market_orders_possible_to_cancel:
+                cancel_result = client.cancel_order(
+                    result
+                )  # May be already filled (then "result" will be returned)
 
-            self.assertOrderIsValid(result, self.testing_order_symbol)
-            if self.platform_id not in [Platform.OKEX, Platform.BILAXY]:
-                # Okex, Bilaxy does not send order_type!!!
+                self.assertOrderIsValid(result, self.testing_order_symbol)
+                if self.platform_id not in [Platform.OKEX, Platform.BILAXY]:
+                    # Okex, Bilaxy does not send order_type!!!
+                    self.assertEqual(
+                        result.order_type,
+                        self.get_order_buy_market_params(self.testing_order_symbol).get(ParamName.ORDER_TYPE),
+                    )
                 self.assertEqual(
-                    result.order_type,
-                    self.get_order_buy_market_params(self.testing_order_symbol).get(ParamName.ORDER_TYPE),
+                    result.direction, self.get_order_buy_market_params(self.testing_order_symbol).get(ParamName.DIRECTION)
                 )
-            self.assertEqual(
-                result.direction, self.get_order_buy_market_params(self.testing_order_symbol).get(ParamName.DIRECTION)
-            )
-            # (None for market type)
-            # self.assertEqual(float(result.price), float(self.order_buy_market_params.get(ParamName.PRICE)))
-            # can't check dynamic value
-            # self.assertEqual(
-            #     float(result.amount_original),
-            #     float(self.order_buy_market_params.get(ParamName.AMOUNT)))
-            # todo
-            # self.assertEqual(float(result.amount_executed), float(self.order_buy_market_params.get(ParamName.AMOUNT)))
-            self.assertGoodResultForCanceledOrder(cancel_result)
+                # (None for market type)
+                # self.assertEqual(float(result.price), float(self.order_buy_market_params.get(ParamName.PRICE)))
+                # can't check dynamic value
+                # self.assertEqual(
+                #     float(result.amount_original),
+                #     float(self.order_buy_market_params.get(ParamName.AMOUNT)))
+                # todo
+                # self.assertEqual(float(result.amount_executed), float(self.order_buy_market_params.get(ParamName.AMOUNT)))
+                # self.assertGoodResultForCanceledOrder(cancel_result)
 
         # Buy, Limit
         result = client.create_order(
@@ -1786,25 +1809,26 @@ class TestPlatformRESTClientPrivate(BaseTestRESTClient):
             self.assertGoodResult(result, is_iterable=False)
             cancel_result = client.cancel_order(result)
 
-            self.assertOrderIsValid(result, self.testing_order_symbol)
-            if self.platform_id not in [Platform.OKEX, Platform.BILAXY]:
-                # Okex, Bilaxy does not send order_type!!!
+            if self.is_market_orders_possible_to_cancel:
+                self.assertOrderIsValid(result, self.testing_order_symbol)
+                if self.platform_id not in [Platform.OKEX, Platform.BILAXY]:
+                    # Okex, Bilaxy does not send order_type!!!
+                    self.assertEqual(
+                        result.order_type,
+                        self.get_order_sell_market_params(self.testing_order_symbol).get(ParamName.ORDER_TYPE),
+                    )
                 self.assertEqual(
-                    result.order_type,
-                    self.get_order_sell_market_params(self.testing_order_symbol).get(ParamName.ORDER_TYPE),
+                    result.direction, self.get_order_sell_market_params(self.testing_order_symbol).get(ParamName.DIRECTION)
                 )
-            self.assertEqual(
-                result.direction, self.get_order_sell_market_params(self.testing_order_symbol).get(ParamName.DIRECTION)
-            )
-            # (None for market type)
-            # self.assertEqual(float(result.price), float(self.order_sell_market_params.get(ParamName.PRICE)))
-            # can't check dynamic values
-            # self.assertEqual(
-            #     float(result.amount_original),
-            #     float(self.order_sell_market_params.get(ParamName.AMOUNT)))
-            # todo
-            # self.assertEqual(float(result.amount_executed), float(self.order_buy_market_params.get(ParamName.AMOUNT)))
-            self.assertGoodResultForCanceledOrder(cancel_result)
+                # (None for market type)
+                # self.assertEqual(float(result.price), float(self.order_sell_market_params.get(ParamName.PRICE)))
+                # can't check dynamic values
+                # self.assertEqual(
+                #     float(result.amount_original),
+                #     float(self.order_sell_market_params.get(ParamName.AMOUNT)))
+                # todo
+                # self.assertEqual(float(result.amount_executed), float(self.order_buy_market_params.get(ParamName.AMOUNT)))
+                self.assertGoodResultForCanceledOrder(cancel_result)
 
     def test_cancel_order(self):
         client = self.client_authed
@@ -2018,23 +2042,7 @@ class TestPlatformRESTClientPrivate(BaseTestRESTClient):
 
     def test_fetch_orders(self):
         client = self.client_authed
-
-        # Error
-
-        # Good
-        # TODO: выяснить всем ли нужен тут именно маркет
-        # Как правило у меня маркет сразу заканчивается сделкой!
-        if self.platform_id in [
-            Platform.BITMEX,
-            Platform.BINANCE,
-            Platform.OKEX,
-            Platform.BITTREX,
-            Platform.COINSUPER,
-            Platform.BILAXY,
-        ]:
-            order = self._create_order(is_limit=True)
-        else:
-            order = self._create_order(is_limit=False)
+        order = self._create_order(is_limit=True)
         # Empty params
         # (For Binance it has weight 40)
         # if self.platform_id != Platform.BINANCE:
@@ -2494,20 +2502,20 @@ class TestPlatformRESTClientHistory(BaseTestRESTClient):
 
     # fetch_trades_history
 
-    def test_fetch_trades_history(self):
-        self.test_fetch_trades("fetch_trades_history")
+    def test_fetch_trades_history(self, is_auth=False):
+        self.test_fetch_trades("fetch_trades_history", is_auth)
 
-    def test_fetch_trades_history_errors(self):
-        self.test_fetch_trades_errors("fetch_trades_history")
+    def test_fetch_trades_history_errors(self, is_auth=False):
+        self.test_fetch_trades_errors("fetch_trades_history", is_auth)
 
-    def test_fetch_trades_history_limit(self):
-        self.test_fetch_trades_limit("fetch_trades_history")
+    def test_fetch_trades_history_limit(self, is_auth=False):
+        self.test_fetch_trades_limit("fetch_trades_history", is_auth)
 
-    def test_fetch_trades_history_limit_is_too_big(self):
-        self.test_fetch_trades_limit_is_too_big("fetch_trades_history")
+    def test_fetch_trades_history_limit_is_too_big(self, is_auth=False):
+        self.test_fetch_trades_limit_is_too_big("fetch_trades_history", is_auth)
 
-    def test_fetch_trades_history_sorting(self):
-        self.test_fetch_trades_sorting("fetch_trades_history")
+    def test_fetch_trades_history_sorting(self, is_auth=False):
+        self.test_fetch_trades_sorting("fetch_trades_history", is_auth)
 
     def test_fetch_trades_is_same_as_first_history(self):
         result = self.client_authed.fetch_trades(self.testing_symbol)
@@ -2889,6 +2897,8 @@ class TestWSClient(TestClient):
 
     def tearDown(self):
         self.client.close()
+        self.client.current_subscriptions.clear()
+        self.client.pending_subscriptions.clear()
         super().tearDown()
 
     def test_trade_1_channel(self):
@@ -3054,7 +3064,7 @@ class TestWSClient(TestClient):
         # Assert item.subscription is OK
         for item in self.received_items.copy():
             self.assertIn(item.subscription, client.current_subscriptions)
-        if self.platform_id not in [Platform.BITMEX]:
+        if self.platform_id not in [Platform.BITMEX, Platform.BINANCE_FUTURE]:
             # supports aggregated subscription
             self.assertEqual(len(client.current_subscriptions), subscription_count)
         # -
@@ -3339,6 +3349,7 @@ class TestPrivateWSClient(TestClient):
         delete_all_test_orders(
             self.platform_id, self.testing_symbol, pivot_symbol=self.pivot_symbol
         )
+        close_all_positions(self.platform_id)
         super().tearDown()
 
     def test_balance_channel(self):
@@ -3404,10 +3415,6 @@ class TestPrivateWSClient(TestClient):
                 self.open_order = create_test_order(
                     self.platform_id, self.testing_symbol, market=True
                 )
-                if Endpoint.POSITION in endpoints:
-                    self.open_order = create_test_order(
-                        self.platform_id, self.testing_symbol, market=True, side=1
-                    )
             else:
                 self.open_order = create_test_order(
                     self.platform_id, self.testing_symbol

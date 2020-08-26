@@ -12,6 +12,7 @@
 
 - Bitmex
 - Binance
+- Binance Futures
 
 _More exchanges will be supported soon!_
 

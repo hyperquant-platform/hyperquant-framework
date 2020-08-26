@@ -3,6 +3,7 @@ import logging
 import os
 import sys
 import time
+from typing import Any
 
 from hyperquant.api import Direction, OrderType, ParamName, Platform
 from hyperquant.clients import Error, PrivatePlatformRESTClient, SingleDataAggregator
@@ -162,3 +163,47 @@ def close_all_positions(platform_id, rest_auth_client=None,
             pivot_symbol=pivot_symbol)
     if rest_auth_client:
         rest_auth_client.close_all_positions()
+
+
+def safe_execute(fun, *args, timeout=20, **kwargs):
+    start_time = time.time()
+    while True:
+        try:
+            return fun(*args, **kwargs)
+        except:
+            if time.time() - start_time > timeout:
+                raise
+            time.sleep(0.2)
+
+
+def wait_condition(condition, timeout=20):
+    start_time = time.time()
+    while time.time() - start_time < timeout:
+        if condition():
+            return True
+        time.sleep(0.2)
+    raise Exception(f'condition failed')
+
+
+def wait_response(received_data, expected_data_type: Any, min_count=1, timeout=30, exact_symbol=None):
+    start_time = time.time()
+    count_found = 0
+    if not isinstance(expected_data_type, list):
+        expected_data_type = [expected_data_type]
+    while time.time() - start_time < timeout:
+        for expected_dt in expected_data_type:
+            count_found = 0
+            for data_obj in received_data:
+                if isinstance(data_obj, expected_dt):
+                    if not exact_symbol:
+                        count_found += 1
+                    else:
+                        if data_obj.symbol == exact_symbol:
+                            count_found += 1
+            if count_found < min_count:
+                break
+        time.sleep(0.2)
+        if count_found >= min_count:
+            return True
+    raise Exception(f'No responses {expected_data_type} was received. '
+                    f'{received_data}')

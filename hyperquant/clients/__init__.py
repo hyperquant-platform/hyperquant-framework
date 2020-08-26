@@ -13,10 +13,10 @@ from copy import deepcopy
 from datetime import datetime, timezone
 from decimal import Decimal
 from inspect import signature
-from threading import Thread, RLock
-from typing import Any, List
+from threading import Thread
+from typing import Any
 from urllib.parse import urlencode, urljoin
-from zlib import MAX_WBITS, decompress
+from zlib import decompress, MAX_WBITS
 
 import requests
 from dateutil import parser
@@ -25,14 +25,13 @@ from signalr import Connection
 from signalr.events import EventHook
 from websocket import WebSocketApp
 
-from hyperquant.api import (CandleInterval, Currency, CurrencyPair, Direction,
-                            Endpoint, ErrorCode, OrderBookDirection,
-                            OrderStatus, OrderType, ParamName, Platform,
-                            Sorting, TransactionType, apply_data_on_obj,
-                            convert_items_obj_to_dict,
-                            convert_items_obj_to_list, convert_items_to_obj,
-                            item_format_by_endpoint)
+from hyperquant.api import (
+    apply_data_on_obj, CandleInterval, convert_items_obj_to_dict, convert_items_obj_to_list, convert_items_to_obj,
+    Currency, CurrencyPair, Direction, Endpoint, ErrorCode, item_format_by_endpoint, OrderBookDirection, OrderStatus,
+    OrderType, ParamName, Platform, Sorting, TransactionStatus, TransactionType,
+)
 from hyperquant.clients.singleton_helper import SingleDataAggregator
+from hyperquant.core.threading import Trigger
 from hyperquant.utils import log_util, time_util
 from hyperquant.utils.log_util import items_to_interval_string, make_short_str
 from hyperquant.utils.math_util import drop_trailing_zeros as dtz
@@ -73,8 +72,11 @@ class ValueObject:
         return data
 
     def _convert_to_json(self, obj, item_format, is_list=False):
-        return convert_items_obj_to_list(obj, item_format) if is_list else \
-            convert_items_obj_to_dict(obj, item_format)
+        return (
+            convert_items_obj_to_list(obj, item_format)
+            if is_list
+            else convert_items_obj_to_dict(obj, item_format)
+        )
 
     def from_json(self, data):
         if isinstance(data, str):
@@ -119,18 +121,22 @@ class DataObject(ValueObject):
 
     # Use only main endpoint name if there are possibly multiple ones (e.g. TICKER instead of TICKER_ALL)
     endpoint = None
+
     # # Plural, because WS may have multiple endpoints for same item type
     # endpoints = None
 
     def __eq__(self, o: object) -> bool:
         return o and isinstance(o, self.__class__)
 
+
 class ItemObject(DataObject):
     # (Note: Order is from abstract to concrete)
     platform_id = None
     symbol = None
     timestamp = None  # Unix timestamp in milliseconds
-    item_id = None  # There is no item_id for candle, ticker, bookticker, only for trade, mytrade and order
+    item_id = (
+        None
+    )  # There is no item_id for candle, ticker, bookticker, only for trade, mytrade and order
 
     # <<<<<<< HEAD
     #     @classmethod
@@ -153,35 +159,50 @@ class ItemObject(DataObject):
 
     @property
     def timestamp_s(self):
-        timestamp_s = self.timestamp / 1000 if self.timestamp and self.is_milliseconds else self.timestamp
+        timestamp_s = (
+            self.timestamp / 1000
+            if self.timestamp and self.is_milliseconds
+            else self.timestamp
+        )
         return timestamp_s
 
     @property
     def timestamp_ms(self):
-        timestamp_ms = self.timestamp * 1000 if self.timestamp and not self.is_milliseconds else self.timestamp
+        timestamp_ms = (
+            self.timestamp * 1000
+            if self.timestamp and not self.is_milliseconds
+            else self.timestamp
+        )
         return timestamp_ms
 
     @property
     def timestamp_iso(self):
-        timestamp_s = self.timestamp / 1000 if self.timestamp and self.is_milliseconds else self.timestamp
+        timestamp_s = (
+            self.timestamp / 1000
+            if self.timestamp and self.is_milliseconds
+            else self.timestamp
+        )
         # timestamp_iso = datetime.utcfromtimestamp(timestamp_s).isoformat() if timestamp_s else timestamp_s
-        dt = datetime.utcfromtimestamp(timestamp_s).astimezone(
-            tz=timezone.utc) if timestamp_s else None
-        timestamp_iso = dt.isoformat().replace('+00:00',
-                                               'Z') if dt else timestamp_s
+        dt = (
+            datetime.utcfromtimestamp(timestamp_s).astimezone(tz=timezone.utc)
+            if timestamp_s
+            else None
+        )
+        timestamp_iso = dt.isoformat().replace("+00:00", "Z") if dt else timestamp_s
         return timestamp_iso
 
-    def __init__(self,
-                 platform_id=None,
-                 symbol=None,
-                 timestamp=None,
-                 item_id=None,
-                 is_milliseconds=False) -> None:
+    def __init__(
+        self,
+        platform_id=None,
+        symbol=None,
+        timestamp=None,
+        item_id=None,
+        is_milliseconds=False,
+    ) -> None:
         super().__init__()
         self.platform_id = platform_id
         self.symbol = symbol
-        self.timestamp = int(
-            timestamp) if timestamp and is_milliseconds else timestamp
+        self.timestamp = int(timestamp) if timestamp and is_milliseconds else timestamp
         self.item_id = item_id
 
         self.is_milliseconds = is_milliseconds
@@ -189,19 +210,26 @@ class ItemObject(DataObject):
     def __eq__(self, o: object) -> bool:
         # Identifying params:
         # (Timestamp may change (for trades on Bitfinex), but it is still the same item)
-        return o and isinstance(o, self.__class__) and \
-               self.platform_id == o.platform_id and \
-               self.item_id == o.item_id and \
-               self.symbol == o.symbol and \
-               (self.item_id is not None or self.timestamp == o.timestamp)
+        return (
+            o
+            and isinstance(o, self.__class__)
+            and self.platform_id == o.platform_id
+            and self.item_id == o.item_id
+            and self.symbol == o.symbol
+            and (self.item_id is not None or self.timestamp == o.timestamp)
+        )
 
     def __hash__(self) -> int:
         return hash((self.platform_id, self.item_id, self.timestamp))
 
     def __repr__(self) -> str:
         return "<Item-%s symbol:%s time:%s %s item_id:%s>" % (
-            self.platform_name, self.symbol, self.timestamp,
-            self.timestamp_iso, self.item_id)
+            self.platform_name,
+            self.symbol,
+            self.timestamp,
+            self.timestamp_iso,
+            self.item_id,
+        )
 
     def __getattribute__(self, name: str) -> Any:
         if name.startswith(ParamName.PRICE) and name.endswith("_real"):
@@ -215,8 +243,7 @@ class ItemObject(DataObject):
                 if self.symbol == "ETHUSD":
                     # https://www.bitmex.com/app/contract/ETHUSD
                     #  "0.001 mXBT за 1 USD (в настоящее время 0.00026765 XBT за контракт)"
-                    value = value * Decimal(
-                        "0.000001") if value is not None else None
+                    value = value * Decimal("0.000001") if value is not None else None
                 elif self.symbol == "XBTUSD":
                     # https://www.bitmex.com/app/contract/XBTUSD
                     value = round(Decimal("1") / value, 8) if value else None
@@ -234,8 +261,7 @@ class ItemObject(DataObject):
             if self.platform_id == Platform.BITMEX:
                 if self.symbol == "ETHUSD":
                     # https://www.bitmex.com/app/contract/ETHUSD
-                    value = value * Decimal(
-                        "1000000") if value is not None else None
+                    value = value * Decimal("1000000") if value is not None else None
                 elif self.symbol == "XBTUSD":
                     # https://www.bitmex.com/app/contract/XBTUSD
                     value = round(Decimal("1") / value, 8) if value else None
@@ -286,17 +312,18 @@ class Trade(ItemObject):
     # def volume(self):
     #     return self.amount * self.price if self.amount is not None and self.price is not None else None
 
-    def __init__(self,
-                 platform_id=None,
-                 symbol=None,
-                 timestamp=None,
-                 item_id=None,
-                 amount=None,
-                 price=None,
-                 direction=None,
-                 is_milliseconds=False) -> None:
-        super().__init__(platform_id, symbol, timestamp, item_id,
-                         is_milliseconds)
+    def __init__(
+        self,
+        platform_id=None,
+        symbol=None,
+        timestamp=None,
+        item_id=None,
+        amount=None,
+        price=None,
+        direction=None,
+        is_milliseconds=False,
+    ) -> None:
+        super().__init__(platform_id, symbol, timestamp, item_id, is_milliseconds)
         self.amount = amount
         self.price = price
         self.direction = direction
@@ -311,11 +338,13 @@ class Trade(ItemObject):
             self.direction_name,
             # (Make big irrational decimal number shorter)
             log_util.make_short_str(self.amount, 8, False),
-            log_util.make_short_str(self.price, 8, False))
+            log_util.make_short_str(self.price, 8, False),
+        )
 
     def __hash__(self) -> int:
-        return hash((self.platform_id, self.item_id, self.amount, self.price,
-                     self.direction))
+        return hash(
+            (self.platform_id, self.item_id, self.amount, self.price, self.direction)
+        )
 
     def __eq__(self, o: object) -> bool:
         # Supposed, that we always receive from all platforms not None item_id,
@@ -323,9 +352,15 @@ class Trade(ItemObject):
         if not super().__eq__(o):
             return False
 
-        if self.item_id is None and o and (self.amount != o.amount
-                                           or self.price != o.price
-                                           or self.direction != o.direction):
+        if (
+            self.item_id is None
+            and o
+            and (
+                self.amount != o.amount
+                or self.price != o.price
+                or self.direction != o.direction
+            )
+        ):
             return False
 
         return True
@@ -336,37 +371,60 @@ class MyTrade(Trade):
 
     # Optional (not for all platforms):
     fee = None  # Комиссия биржи  # must be always positive; 0 if not supported
-    rebate = None  # Возврат денег, скидка после покупки  # must be always positive; 0 if not supported
+    rebate = (
+        None
+    )  # Возврат денег, скидка после покупки  # must be always positive; 0 if not supported
 
-    # fee_symbol = None  # Currency symbol, by default, it's the same as for price
+    fee_currency = None  # Currency symbol, by default, it's the same as for price
     # Note: volume = amount * price, total = volume - fee + rebate
 
-    def __init__(self,
-                 platform_id=None,
-                 symbol=None,
-                 timestamp=None,
-                 item_id=None,
-                 amount=None,
-                 price=None,
-                 direction=None,
-                 order_id=None,
-                 fee=None,
-                 rebate=None,
-                 is_milliseconds=False) -> None:
-        super().__init__(platform_id, symbol, timestamp, item_id, amount,
-                         price, direction, is_milliseconds)
+    def __init__(
+        self,
+        platform_id=None,
+        symbol=None,
+        timestamp=None,
+        item_id=None,
+        amount=None,
+        price=None,
+        direction=None,
+        order_id=None,
+        fee=None,
+        rebate=None,
+        is_milliseconds=False,
+        fee_currency=None,
+    ) -> None:
+        super().__init__(
+            platform_id,
+            symbol,
+            timestamp,
+            item_id,
+            amount,
+            price,
+            direction,
+            is_milliseconds,
+        )
         self.order_id = order_id
         self.fee = fee
         self.rebate = rebate
 
     def __repr__(self) -> str:
-        return "<MyTrade-%s symbol:%s time:%s %s item_id:%s %s am:%s pr:%s order:%s%s%s>" % (
-            self.platform_name, self.symbol, self.timestamp,
-            self.timestamp_iso, self.item_id, self.direction_name,
-            log_util.make_short_str(self.amount, 8, False),
-            log_util.make_short_str(self.price, 8, False), self.order_id,
-            " fee: %s" % self.fee if self.fee else "",
-            " rebate: %s" % self.rebate if self.rebate else "")
+        return (
+            "<MyTrade-%s symbol:%s time:%s %s item_id:%s %s am:%s pr:%s order:%s%s%s%s>"
+            % (
+                self.platform_name,
+                self.symbol,
+                self.timestamp,
+                self.timestamp_iso,
+                self.item_id,
+                self.direction_name,
+                log_util.make_short_str(self.amount, 8, False),
+                log_util.make_short_str(self.price, 8, False),
+                self.order_id,
+                " fee: %s" % self.fee if self.fee else "",
+                " rebate: %s" % self.rebate if self.rebate else "",
+                " fee_currency: %s" % self.fee_currency if self.fee_currency else "",
+            )
+        )
 
 
 class Candle(ItemObject):
@@ -391,24 +449,28 @@ class Candle(ItemObject):
     # Optional
     trades_count = None
 
-    def __init__(self,
-                 platform_id=None,
-                 symbol=None,
-                 interval=None,
-                 timestamp=None,
-                 timestamp_close=None,
-                 price_open=None,
-                 price_close=None,
-                 price_high=None,
-                 price_low=None,
-                 volume=None,
-                 trades_count=None,
-                 is_milliseconds=False) -> None:
+    def __init__(
+        self,
+        platform_id=None,
+        symbol=None,
+        interval=None,
+        timestamp=None,
+        timestamp_close=None,
+        price_open=None,
+        price_close=None,
+        price_high=None,
+        price_low=None,
+        volume=None,
+        trades_count=None,
+        is_milliseconds=False,
+    ) -> None:
         super().__init__(platform_id, symbol, timestamp, None, is_milliseconds)
         self.interval = interval
-        self.timestamp_close = int(
-            timestamp_close
-        ) if timestamp_close and is_milliseconds else timestamp_close
+        self.timestamp_close = (
+            int(timestamp_close)
+            if timestamp_close and is_milliseconds
+            else timestamp_close
+        )
         self.price_open = price_open
         self.price_close = price_close
         self.price_high = price_high
@@ -417,26 +479,48 @@ class Candle(ItemObject):
         self.trades_count = trades_count
 
     def __repr__(self) -> str:
-        return "<Candle-%s symbol:%s interval:%s time:%s %s pr op/cl:%s/%s hi/lo:%s/%s vol:%s count:%s>" % (
-            self.platform_name, self.symbol, self.interval, self.timestamp,
-            self.timestamp_iso, self.price_open, self.price_close,
-            self.price_high, self.price_low, self.volume, self.trades_count)
+        return (
+            "<Candle-%s symbol:%s interval:%s time:%s %s pr op/cl:%s/%s hi/lo:%s/%s vol:%s count:%s>"
+            % (
+                self.platform_name,
+                self.symbol,
+                self.interval,
+                self.timestamp,
+                self.timestamp_iso,
+                self.price_open,
+                self.price_close,
+                self.price_high,
+                self.price_low,
+                self.volume,
+                self.trades_count,
+            )
+        )
 
     def __hash__(self) -> int:
-        return hash((self.platform_id, self.timestamp, self.price_open,
-                     self.price_close, self.volume))
+        return hash(
+            (
+                self.platform_id,
+                self.timestamp,
+                self.price_open,
+                self.price_close,
+                self.volume,
+            )
+        )
 
     def __eq__(self, o: object) -> bool:
         if not super().__eq__(o):
             return False
 
-        if (self.interval != o.interval
-                or  # self.timestamp_close != o.timestamp_close or
-                self.price_open != o.price_open or
-                self.price_close != o.price_close or
-                self.price_high != o.price_high or
-                self.price_low != o.price_low or self.volume != o.volume or
-                self.trades_count != o.trades_count):
+        if (
+            self.interval != o.interval
+            or self.price_open  # self.timestamp_close != o.timestamp_close or
+            != o.price_open
+            or self.price_close != o.price_close
+            or self.price_high != o.price_high
+            or self.price_low != o.price_low
+            or self.volume != o.volume
+            or self.trades_count != o.trades_count
+        ):
             return False
         return True
 
@@ -450,10 +534,14 @@ class Candle(ItemObject):
     def sorted(candles):
         if not candles:
             return candles
-        result = sorted(candles,
-                        key=lambda c:
-                        (c.timestamp_close or c.timestamp + CandleInterval.
-                         convert_to_minutes(c.interval) * 60, -c.timestamp))
+        result = sorted(
+            candles,
+            key=lambda c: (
+                c.timestamp_close
+                or c.timestamp + CandleInterval.convert_to_minutes(c.interval) * 60,
+                -c.timestamp,
+            ),
+        )
         # --CandleInterval.convert_to_minutes(c.interval)))
         return result
 
@@ -466,19 +554,25 @@ class Ticker(ItemObject):
     # Last price (of last trade) in quote currency (USD in BTCUSD)
     price = None
 
-    def __init__(self,
-                 platform_id=None,
-                 symbol=None,
-                 timestamp=None,
-                 price=None,
-                 is_milliseconds=False) -> None:
+    def __init__(
+        self,
+        platform_id=None,
+        symbol=None,
+        timestamp=None,
+        price=None,
+        is_milliseconds=False,
+    ) -> None:
         super().__init__(platform_id, symbol, timestamp, None, is_milliseconds)
         self.price = price
 
     def __repr__(self) -> str:
         return "<Ticker-%s symbol:%s time:%s %s pr:%s>" % (
-            self.platform_name, self.symbol, self.timestamp,
-            self.timestamp_iso, log_util.make_short_str(self.price, 8, False))
+            self.platform_name,
+            self.symbol,
+            self.timestamp,
+            self.timestamp_iso,
+            log_util.make_short_str(self.price, 8, False),
+        )
 
     def __hash__(self) -> int:
         return hash((self.platform_id, self.timestamp, self.price))
@@ -511,8 +605,9 @@ class OrderBook(ItemObject):
     @asks.setter
     def asks(self, value):
         self._asks = value
-        if self._asks and isinstance(self._asks[0],
-                                     OrderBookItem):  # (Check type for BitMEX)
+        if self._asks and isinstance(
+            self._asks[0], OrderBookItem
+        ):  # (Check type for BitMEX)
             for item in self._asks:
                 item.platform_id = self.platform_id
                 item.symbol = self.symbol
@@ -524,31 +619,38 @@ class OrderBook(ItemObject):
     @bids.setter
     def bids(self, value):
         self._bids = value
-        if self._bids and isinstance(self._bids[0],
-                                     OrderBookItem):  # (Check type for BitMEX)
+        if self._bids and isinstance(
+            self._bids[0], OrderBookItem
+        ):  # (Check type for BitMEX)
             for item in self._bids:
                 item.platform_id = self.platform_id
                 item.symbol = self.symbol
 
-    def __init__(self,
-                 platform_id=None,
-                 symbol=None,
-                 timestamp=None,
-                 item_id=None,
-                 is_milliseconds=False,
-                 asks=None,
-                 bids=None) -> None:
-        super().__init__(platform_id, symbol, timestamp, item_id,
-                         is_milliseconds)
+    def __init__(
+        self,
+        platform_id=None,
+        symbol=None,
+        timestamp=None,
+        item_id=None,
+        is_milliseconds=False,
+        asks=None,
+        bids=None,
+    ) -> None:
+        super().__init__(platform_id, symbol, timestamp, item_id, is_milliseconds)
         self.asks = asks
         self.bids = bids
 
     def __repr__(self) -> str:
         return "<%s-%s symbol:%s time:%s %s item_id:%s asks:%s bids:%s>" % (
-            self._name, self.platform_name,
-            self.symbol, self.timestamp, self.timestamp_iso, self.item_id,
+            self._name,
+            self.platform_name,
+            self.symbol,
+            self.timestamp,
+            self.timestamp_iso,
+            self.item_id,
             len(self.asks) if self.asks is not None else self.asks,
-            len(self.bids) if self.bids is not None else self.bids)
+            len(self.bids) if self.bids is not None else self.bids,
+        )
 
     def __eq__(self, o: object) -> bool:
         if not super().__eq__(o):
@@ -560,53 +662,69 @@ class OrderBook(ItemObject):
         return True
 
     def __hash__(self):
-        return hash((self.platform_id, self.symbol, self.item_id,
-                     self.timestamp, self.asks, self.bids))
+        return hash(
+            (
+                self.platform_id,
+                self.symbol,
+                self.item_id,
+                self.timestamp,
+                self.asks,
+                self.bids,
+            )
+        )
 
     def _convert_to_json(self, obj, item_format, is_list=False):
         result = super()._convert_to_json(obj, item_format, is_list)
-        for k, v in enumerate(result) if isinstance(result,
-                                                    list) else result.items():
+        for k, v in enumerate(result) if isinstance(result, list) else result.items():
             if v and isinstance(v, list) and isinstance(v[0], OrderBookItem):
-                result[k] = convert_items_obj_to_list(v, OrderBookItem.ITEM_FORMAT) if is_list else \
-                    convert_items_obj_to_dict(v, OrderBookItem.ITEM_FORMAT)
+                result[k] = (
+                    convert_items_obj_to_list(v, OrderBookItem.ITEM_FORMAT)
+                    if is_list
+                    else convert_items_obj_to_dict(v, OrderBookItem.ITEM_FORMAT)
+                )
         return result
 
     def from_json(self, data):
         super().from_json(data)
 
-        self.asks = convert_items_to_obj(self.asks, OrderBookItem.ITEM_FORMAT,
-                                         OrderBookItem)
-        self.bids = convert_items_to_obj(self.bids, OrderBookItem.ITEM_FORMAT,
-                                         OrderBookItem)
-        self._on_bids_asks_updated()
+        self.asks = convert_items_to_obj(
+            self.asks, OrderBookItem.ITEM_FORMAT, OrderBookItem
+        )
+        self.bids = convert_items_to_obj(
+            self.bids, OrderBookItem.ITEM_FORMAT, OrderBookItem
+        )
+        # self._on_bids_asks_updated()
 
 
 class Quote(ItemObject):
     bestbid = None
     bestask = None
 
-    def __init__(self,
-                 platform_id=None,
-                 symbol=None,
-                 timestamp=None,
-                 bestbid=None,
-                 bestask=None,
-                 is_milliseconds=False) -> None:
+    def __init__(
+        self,
+        platform_id=None,
+        symbol=None,
+        timestamp=None,
+        bestbid=None,
+        bestask=None,
+        is_milliseconds=False,
+    ) -> None:
         super().__init__(platform_id, symbol, timestamp, None, is_milliseconds)
         self.bestask = bestask
         self.bestbid = bestbid
 
     def __repr__(self) -> str:
         return "<Quote-%s symbol:%s time:%s %s bid %s, ask %s>" % (
-            self.platform_name, self.symbol, self.timestamp,
-            self.timestamp_iso, log_util.make_short_str(
-                self.bestbid, 8,
-                False), log_util.make_short_str(self.bestask, 8, False))
+            self.platform_name,
+            self.symbol,
+            self.timestamp,
+            self.timestamp_iso,
+            log_util.make_short_str(self.bestbid, 8, False),
+            log_util.make_short_str(self.bestask, 8, False),
+        )
 
     def __hash__(self) -> int:
-        return hash(
-            (self.platform_id, self.timestamp, self.bestask, self.bestbid))
+        return hash((self.platform_id, self.timestamp, self.bestask, self.bestbid))
 
     def __eq__(self, o: object) -> bool:
         if not super().__eq__(o):
@@ -633,9 +751,7 @@ class AggOrderBook(OrderBook):
 
     @property
     def platform_name(self):
-        return [
-            Platform.get_platform_name_by_id(id) for id in self.platform_ids
-        ]
+        return [Platform.get_platform_name_by_id(id) for id in self.platform_ids]
 
 
 class OrderBookItem(ItemObject):
@@ -656,18 +772,19 @@ class OrderBookItem(ItemObject):
     def direction_name(self):
         return OrderBookDirection.name_by_value.get(self.direction)
 
-    def __init__(self,
-                 platform_id=None,
-                 symbol=None,
-                 timestamp=None,
-                 item_id=None,
-                 is_milliseconds=False,
-                 amount=None,
-                 price=None,
-                 direction=None,
-                 orders_count=None) -> None:
-        super().__init__(platform_id, symbol, timestamp, item_id,
-                         is_milliseconds)
+    def __init__(
+        self,
+        platform_id=None,
+        symbol=None,
+        timestamp=None,
+        item_id=None,
+        is_milliseconds=False,
+        amount=None,
+        price=None,
+        direction=None,
+        orders_count=None,
+    ) -> None:
+        super().__init__(platform_id, symbol, timestamp, item_id, is_milliseconds)
 
         self.amount = amount
         self.price = price
@@ -679,19 +796,32 @@ class OrderBookItem(ItemObject):
             self.platform_name,  # self.item_id, self.symbol,
             self.direction_name,
             log_util.make_short_str(self.amount, 8, False),
-            log_util.make_short_str(self.price, 8, False))
+            log_util.make_short_str(self.price, 8, False),
+        )
 
     def __hash__(self):
-        return hash((self.platform_id, self.symbol, self.item_id,
-                     self.timestamp, self.amount, self.price, self.direction))
+        return hash(
+            (
+                self.platform_id,
+                self.symbol,
+                self.item_id,
+                self.timestamp,
+                self.amount,
+                self.price,
+                self.direction,
+            )
+        )
 
     def __eq__(self, o: object) -> bool:
         if not super().__eq__(o):
             return False
 
-        if o and (self.amount != o.amount or self.price != o.price
-                  or self.direction != o.direction
-                  or self.orders_count != o.orders_count):
+        if o and (
+            self.amount != o.amount
+            or self.price != o.price
+            or self.direction != o.direction
+            or self.orders_count != o.orders_count
+        ):
             return False
 
         return True
@@ -778,17 +908,25 @@ class Balance(DataObject):
                  platform_id=None,
                  symbol=None,
                  amount_available=None,
-                 amount_reserved=None) -> None:
+                 amount_reserved=None,
+                 pnl=None) -> None:
         super().__init__()
         self.platform_id = platform_id
         self.symbol = symbol
         self.amount_available = amount_available
         self.amount_reserved = amount_reserved
+        self.pnl = pnl
 
     def __repr__(self) -> str:
-        return "<Balance-%s symbol:%s amount:%s (+%s=%s) pnl:%s>" % (
-            self.platform_name, self.symbol, self.amount_available,
-            self.amount_reserved, self.amount_total, self.pnl)
+        return "<Balance-%s symbol:%s (+%s=%s) avlbl:%s pnl:%s mrgn:%s>" % (
+            self.platform_name,
+            self.symbol,
+            self.amount_reserved,
+            self.amount_total,
+            self.amount_available,
+            self.pnl,
+            self.margin_balance,
+        )
 
     @property
     def is_borrowed(self):
@@ -814,7 +952,9 @@ class Balance(DataObject):
         if o and (self.platform_id != o.platform_id or self.symbol != o.symbol
                   or self.amount_available != o.amount_available
                   or self.amount_reserved != o.amount_reserved
-                  or self.amount_borrowed != o.amount_borrowed):
+                  or self.amount_borrowed != o.amount_borrowed
+                  or self.pnl != o.pnl
+                  or self.margin_balance != o.margin_balance):
             return False
 
         return True
@@ -826,28 +966,36 @@ class Balance(DataObject):
 # todo tests
 class BalanceTransaction(ItemObject):
     transaction_type = None
+    transaction_status = None
     # (> 0 - Deposit, < 0 - Withdrawal)
     amount = None
     fee = None
-
-    # todo
-    # transaction_status = None
+    # Related currency pair for certain types (funding, realised pnl)
+    currency_pair = None
 
     @property
-    def is_created_by_user(self):
-        return TransactionType.check_is_created_by_user(self.transaction_type)
+    def is_direct(self):
+        return TransactionType.check_is_direct(self.transaction_type)
 
-    def __init__(self,
-                 platform_id=None,
-                 symbol=None,
-                 timestamp=None,
-                 item_id=None,
-                 transaction_type=None,
-                 amount=None,
-                 fee=None,
-                 is_milliseconds=False) -> None:
-        super().__init__(platform_id, symbol, timestamp, item_id,
-                         is_milliseconds)
+    @property
+    def is_completed(self):
+        if self.transaction_status is None:
+            return True
+        return self.transaction_status == TransactionStatus.COMPLETED
+
+    def __init__(
+        self,
+        platform_id=None,
+        symbol=None,
+        timestamp=None,
+        item_id=None,
+        transaction_type=None,
+        amount=None,
+        fee=None,
+        is_milliseconds=False,
+        currency_pair=None,
+    ) -> None:
+        super().__init__(platform_id, symbol, timestamp, item_id, is_milliseconds)
         # self.platform_id = platform_id
         # self.symbol = symbol
         # self.timestamp = timestamp
@@ -856,24 +1004,42 @@ class BalanceTransaction(ItemObject):
         self.transaction_type = transaction_type
         self.amount = amount
         self.fee = fee
+        self.currency_pair = currency_pair
 
     def __repr__(self) -> str:
         return "<BalanceTransaction-%s symbol:%s time:%s %s amount:%s>" % (
-            self.platform_name, self.symbol, self.timestamp,
-            self.timestamp_iso, self.amount)
+            self.platform_name,
+            self.symbol,
+            self.timestamp,
+            self.timestamp_iso,
+            self.amount,
+        )
 
     def __hash__(self):
         return hash(
-            (self.platform_id, self.symbol, self.item_id, self.timestamp,
-             self.amount, self.transaction_type, self.fee))
+            (
+                self.platform_id,
+                self.symbol,
+                self.item_id,
+                self.timestamp,
+                self.amount,
+                self.transaction_type,
+                self.fee,
+                self.currency_pair,
+            )
+        )
 
     def __eq__(self, o: object) -> bool:
         if not super().__eq__(o):
             return False
 
-        if o and (self.platform_id != o.platform_id or self.symbol != o.symbol
-                  or self.amount != o.amount
-                  or self.transaction_type != o.transaction_type):
+        if o and (
+            self.platform_id != o.platform_id
+            or self.symbol != o.symbol
+            or self.amount != o.amount
+            or self.transaction_type != o.transaction_type
+            or self.currency_pair != o.currency_pair
+        ):
             return False
 
         return True
@@ -896,9 +1062,18 @@ class Order(ItemObject):
     order_status = None  # open and close
 
     def __hash__(self):
-        return hash((self.platform_id, self.symbol, self.item_id,
-                     self.timestamp, self.order_type, self.amount_original,
-                     self.price, self.direction))
+        return hash(
+            (
+                self.platform_id,
+                self.symbol,
+                self.item_id,
+                self.timestamp,
+                self.order_type,
+                self.amount_original,
+                self.price,
+                self.direction,
+            )
+        )
 
     @property
     def direction_name(self):
@@ -944,36 +1119,48 @@ class Order(ItemObject):
     @property
     def is_partially_filled(self):
         # -return self.order_status == OrderStatus.  # there is also status OPEN
-        return self.is_open and self.amount_executed and self.amount_original and \
-               0 < self.amount_executed < self.amount_original
+        return (
+            self.is_open
+            and self.amount_executed
+            and self.amount_original
+            and 0 < self.amount_executed < self.amount_original
+        )
 
     @property
     def is_filled(self):
         # (Should be always is_closed=True if amount_executed reaches amount_original)
-        return self.is_closed and self.amount_executed and self.amount_original and \
-               self.amount_executed >= self.amount_original
+        return (
+            self.is_closed
+            and self.amount_executed
+            and self.amount_original
+            and self.amount_executed >= self.amount_original
+        )
 
     @property
     def amount_left(self):
-        return self.amount_original - self.amount_executed \
-            if self.amount_original and self.amount_executed else self.amount_original
+        return (
+            self.amount_original - self.amount_executed
+            if self.amount_original and self.amount_executed
+            else self.amount_original
+        )
 
-    def __init__(self,
-                 platform_id=None,
-                 symbol=None,
-                 timestamp=None,
-                 item_id=None,
-                 is_milliseconds=False,
-                 user_order_id=None,
-                 order_type=None,
-                 amount_original=None,
-                 amount_executed=None,
-                 price=None,
-                 price_stop=None,
-                 direction=None,
-                 order_status=None) -> None:
-        super().__init__(platform_id, symbol, timestamp, item_id,
-                         is_milliseconds)
+    def __init__(
+        self,
+        platform_id=None,
+        symbol=None,
+        timestamp=None,
+        item_id=None,
+        is_milliseconds=False,
+        user_order_id=None,
+        order_type=None,
+        amount_original=None,
+        amount_executed=None,
+        price=None,
+        price_stop=None,
+        direction=None,
+        order_status=None,
+    ) -> None:
+        super().__init__(platform_id, symbol, timestamp, item_id, is_milliseconds)
         self.user_order_id = user_order_id
         self.order_type = order_type
         self.amount_original = amount_original
@@ -984,23 +1171,42 @@ class Order(ItemObject):
         self.order_status = order_status
 
     def __repr__(self) -> str:
-        return "<Order-%s item_id:%s time:%s symbol:%s %s type:%s status:%s am:%s/%s pr:%s>" % (
-            self.platform_name, self.item_id, self.timestamp_iso, self.symbol,
-            self.direction_name, self.order_type_name, self.order_status_name,
-            self.amount_executed, self.amount_original, self.price)
+        return (
+            "<Order-%s item_id:%s time:%s symbol:%s %s type:%s status:%s am:%s/%s pr:%s>"
+            % (
+                self.platform_name,
+                self.item_id,
+                self.timestamp_iso,
+                self.symbol,
+                self.direction_name,
+                self.order_type_name,
+                self.order_status_name,
+                self.amount_executed,
+                self.amount_original,
+                self.price,
+            )
+        )
 
     def __eq__(self, o: object) -> bool:
         if not super().__eq__(o):
             return False
 
-        if o and (self.user_order_id != o.user_order_id
-                  or self.order_type != o.order_type
-                  or self.amount_original != o.amount_original
-                  or self.amount_executed != o.amount_executed
-                  or self.price != o.price or self.direction != o.direction
-                  or self.order_status != o.order_status):
+        if o and (
+            self.user_order_id != o.user_order_id
+            or self.order_type != o.order_type
+            or self.amount_original != o.amount_original
+            or self.amount_executed != o.amount_executed
+            or self.price != o.price
+            or self.direction != o.direction
+            or self.order_status != o.order_status
+        ):
             return False
 
+        return True
+
+    def __contains__(self, o: object) -> bool:
+        if not super().__eq__(o):
+            return False
         return True
 
 
@@ -1014,7 +1220,7 @@ class Position(DataObject):
     direction = None
     average_price = None
     margincall_price = None
-    profit_n_loss = None
+    pnl = None
 
     # for okex
     amount_borrowed = None
@@ -1023,7 +1229,11 @@ class Position(DataObject):
 
     @property
     def is_open(self):
-        return self._is_open if self._is_open is not None else self.amount and self.amount > 0
+        return (
+            self._is_open
+            if self._is_open is not None
+            else self.amount and self.amount > 0
+        )
 
     @is_open.setter
     def is_open(self, value):
@@ -1055,12 +1265,9 @@ class Position(DataObject):
     # def is_open(self):
     #     return bool(self.amount)
 
-    def __init__(self,
-                 platform_id=None,
-                 symbol=None,
-                 timestamp=None,
-                 amount=None,
-                 direction=None) -> None:
+    def __init__(
+        self, platform_id=None, symbol=None, timestamp=None, amount=None, direction=None, pnl=None
+    ) -> None:
         super().__init__()
         self.platform_id = platform_id
         self.symbol = symbol
@@ -1068,20 +1275,32 @@ class Position(DataObject):
 
         self.amount = amount
         self.direction = direction
+        self.pnl = pnl
 
     def __repr__(self) -> str:
-        return "<Position-%s symbol:%s time:%s %s %s amount:%s>" % (
-            self.platform_name, self.symbol, self.timestamp_iso,
-            ("open" if self.is_open else "closed") if self.is_open is not None
-            else self.is_open, self.direction_name, self.amount)
+        return "<Position-%s symbol:%s time:%s %s %s amount:%s pnl:%s>" % (
+            self.platform_name,
+            self.symbol,
+            self.timestamp_iso,
+            ("open" if self.is_open else "closed")
+            if self.is_open is not None
+            else self.is_open,
+            self.direction_name,
+            self.amount,
+            self.pnl,
+        )
 
     def __eq__(self, o: object) -> bool:
         if not super().__eq__(o):
             return False
 
-        if o and (self.platform_id != o.platform_id or self.symbol != o.symbol
-                  or self.timestamp != o.timestamp or self.amount != o.amount
-                  or self.direction != o.direction):
+        if o and (
+            self.platform_id != o.platform_id
+            or self.symbol != o.symbol
+            or self.timestamp != o.timestamp
+            or self.amount != o.amount
+            or self.direction != o.direction
+        ):
             return False
 
         return True
@@ -1094,21 +1313,36 @@ class Transfer(ItemObject):
 
     def __hash__(self):
         return hash(
-            (self.platform_id, self.symbol, self.item_id, self.timestamp,
-             self.amount, self.from_transfer, self.to_transfer))
+            (
+                self.platform_id,
+                self.symbol,
+                self.item_id,
+                self.timestamp,
+                self.amount,
+                self.from_transfer,
+                self.to_transfer,
+            )
+        )
 
     def __repr__(self) -> str:
         return "<Transfer-%s symbol:%s time:%s from %s to %s amount:%s>" % (
-            self.platform_name, self.symbol, self.timestamp_iso,
-            self.from_transfer, self.to_transfer, self.amount)
+            self.platform_name,
+            self.symbol,
+            self.timestamp_iso,
+            self.from_transfer,
+            self.to_transfer,
+            self.amount,
+        )
 
     def __eq__(self, o: object) -> bool:
         if not super().__eq__(o):
             return False
 
-        if o and (self.amount != o.amount
-                  or self.from_transfer != o.from_transfer
-                  or self.to_transfer != o.to_transfer):
+        if o and (
+            self.amount != o.amount
+            or self.from_transfer != o.from_transfer
+            or self.to_transfer != o.to_transfer
+        ):
             return False
 
         return True
@@ -1117,13 +1351,18 @@ class Transfer(ItemObject):
 class ItemIdGeneratorMixin:
     @staticmethod
     def _create_trade_item_id_hash_str(item):
-        return (str(item.timestamp) + str(item.symbol) + str(item.amount) +
-                str(item.price) + str(item.direction))
+        return (
+            str(item.timestamp)
+            + str(item.symbol)
+            + str(item.amount)
+            + str(item.price)
+            + str(item.direction)
+        )
 
     @staticmethod
     def _generate_trade_item_id(hash_str):
         item_id = hashlib.sha1()
-        item_id.update(hash_str.encode('utf-8'))
+        item_id.update(hash_str.encode("utf-8"))
         return item_id.hexdigest()
 
     def generate_item_ids(self, result):
@@ -1132,8 +1371,9 @@ class ItemIdGeneratorMixin:
             for item in result:
                 if type(item) == Trade and item.item_id is None:
                     hash_str = self._create_trade_item_id_hash_str(item)
-                    iter_hash_str = '{}-{}'.format(hash_str,
-                                                   item_id_hash_strs[hash_str])
+                    iter_hash_str = "{}-{}".format(
+                        hash_str, item_id_hash_strs[hash_str]
+                    )
                     item_id_hash_strs[hash_str] += 1
                     item.item_id = self._generate_trade_item_id(iter_hash_str)
 
@@ -1162,7 +1402,9 @@ class ProtocolConverter:
     # Our endpoint to platform_endpoint
     endpoint_lookup = None  # {"endpoint": "platform_endpoint", ...}
     # Our param_name to platform_param_name
-    param_name_lookup = None  # {ParamName.FROM_TIME: "start", "not_supported": None, ...}
+    param_name_lookup = (
+        None
+    )  # {ParamName.FROM_TIME: "start", "not_supported": None, ...}
     # Our param_value to platform_param_value
     # (Also to convert "BTCUSD" to "XBTUSD" for BitMEX, and vice versa for Binance)
     param_value_lookup = None  # {Sorting.ASCENDING: 0}
@@ -1236,12 +1478,23 @@ class ProtocolConverter:
 
     # For converting numbers
     currency_param_names = [
-        ParamName.FROM_PRICE, ParamName.TO_PRICE, ParamName.AMOUNT_ORIGINAL,
-        ParamName.AMOUNT_EXECUTED, ParamName.AMOUNT_AVAILABLE,
-        ParamName.MARGIN_BALANCE, ParamName.AMOUNT_RESERVED, ParamName.AMOUNT,
-        ParamName.AMOUNT_BORROWED, ParamName.PRICE_OPEN, ParamName.PRICE_CLOSE,
-        ParamName.PRICE_HIGH, ParamName.PRICE_LOW, ParamName.PRICE,
-        ParamName.PNL, ParamName.FEE, ParamName.REBATE
+        ParamName.FROM_PRICE,
+        ParamName.TO_PRICE,
+        ParamName.AMOUNT_ORIGINAL,
+        ParamName.AMOUNT_EXECUTED,
+        ParamName.AMOUNT_AVAILABLE,
+        ParamName.MARGIN_BALANCE,
+        ParamName.AMOUNT_RESERVED,
+        ParamName.AMOUNT,
+        ParamName.AMOUNT_BORROWED,
+        ParamName.PRICE_OPEN,
+        ParamName.PRICE_CLOSE,
+        ParamName.PRICE_HIGH,
+        ParamName.PRICE_LOW,
+        ParamName.PRICE,
+        ParamName.PNL,
+        ParamName.FEE,
+        ParamName.REBATE,
     ]
     # decimal_param_names = currency_param_names + [ParamName.AMOUNT]
 
@@ -1260,8 +1513,11 @@ class ProtocolConverter:
         if version is not None:
             self.version = version
 
-        initial_param_value_reversed_lookup = self.param_value_reversed_lookup.copy() \
-            if self.param_value_reversed_lookup else None
+        initial_param_value_reversed_lookup = (
+            self.param_value_reversed_lookup.copy()
+            if self.param_value_reversed_lookup
+            else None
+        )
         if self.param_value_reversed_lookup is None:
             self.param_value_reversed_lookup = {}
         if self.param_value_lookup:
@@ -1271,8 +1527,8 @@ class ProtocolConverter:
                     if not self.param_value_reversed_lookup.get(param_name):
                         self.param_value_reversed_lookup[param_name] = {}
                     self.param_value_reversed_lookup[param_name].update(
-                        {v: k
-                         for k, v in value.items()})
+                        {v: k for k, v in value.items()}
+                    )
                 else:
                     self.param_value_reversed_lookup[value] = key
             if initial_param_value_reversed_lookup:
@@ -1282,19 +1538,21 @@ class ProtocolConverter:
         # Create logger
         platform_name = Platform.get_platform_name_by_id(self.platform_id)
         self.logger = logging.getLogger(
-            "%s.%s.v%s" % ("Converter", platform_name, self.version))
+            "%s.%s.v%s" % ("Converter", platform_name, self.version)
+        )
 
     # Convert to platform format
 
-    def make_url_and_platform_params(self,
-                                     endpoint=None,
-                                     params=None,
-                                     is_join_get_params=False,
-                                     version=None):
+    def make_url_and_platform_params(
+        self, endpoint=None, params=None, is_join_get_params=False, version=None
+    ):
         # Apply version on base_url
         version = version or self.version
-        url = self.base_url.format(
-            version=version) if self.base_url and version else self.base_url
+        url = (
+            self.base_url.format(version=version)
+            if self.base_url and version
+            else self.base_url
+        )
         # Prepare path and params
         url_resources, platform_params = self.prepare_params(endpoint, params)
 
@@ -1328,11 +1586,17 @@ class ProtocolConverter:
 
     def _convert_params_to_platform(self, params, endpoint):
         # Convert our code's names to custom platform's names
-        platform_params = {
-            self._get_platform_param_name(key): self._process_param_value(
-                key, value)
-            for key, value in params.items() if value is not None
-        } if params else {}
+        platform_params = (
+            {
+                self._get_platform_param_name(key): self._process_param_value(
+                    key, value
+                )
+                for key, value in params.items()
+                if value is not None
+            }
+            if params
+            else {}
+        )
         # (Del not supported by platform params which defined in lookups as empty)
         platform_params.pop("", "")
         platform_params.pop(None, None)
@@ -1340,10 +1604,15 @@ class ProtocolConverter:
 
     def _convert_param_values_to_platform(self, params):
         # Convert our code's values to custom platform's values
-        platform_params = {
-            key: self._process_param_value(key, value)
-            for key, value in params.items() if value is not None
-        } if params else {}
+        platform_params = (
+            {
+                key: self._process_param_value(key, value)
+                for key, value in params.items()
+                if value is not None
+            }
+            if params
+            else {}
+        )
         return platform_params
 
     def _process_param_value(self, name, value):
@@ -1356,8 +1625,11 @@ class ProtocolConverter:
         # Convert our code's endpoint to custom platform's endpoint
 
         # Endpoint.TRADE -> "trades/{symbol}" or "trades" or lambda params: "trades"
-        platform_endpoint = self.endpoint_lookup.get(
-            endpoint, endpoint) if self.endpoint_lookup else endpoint
+        platform_endpoint = (
+            self.endpoint_lookup.get(endpoint, endpoint)
+            if self.endpoint_lookup
+            else endpoint
+        )
         platform_params = self._convert_param_values_to_platform(params)
         if callable(platform_endpoint):
             platform_endpoint = platform_endpoint(platform_params)
@@ -1370,8 +1642,9 @@ class ProtocolConverter:
 
     def _get_platform_param_name(self, name):
         # Convert our code's param name to custom platform's param name
-        return self.param_name_lookup.get(
-            name, name) if self.param_name_lookup else name
+        return (
+            self.param_name_lookup.get(name, name) if self.param_name_lookup else name
+        )
 
     def _get_platform_param_value(self, value, name=None):
         # Convert our code's param value to custom platform's param value
@@ -1379,12 +1652,14 @@ class ProtocolConverter:
         lookup_for_param = lookup.get(name, lookup) if lookup else None
         if isinstance(value, str) and name == ParamName.SYMBOL:
             if self.is_delimiter_used:
-                value = value.replace(Currency.DELIMITER, self.symbol_delimiter
-                                      or "")
+                value = value.replace(Currency.DELIMITER, self.symbol_delimiter or "")
         if isinstance(value, list):
             return value
-        return lookup_for_param.get(value, value) if lookup_for_param else (
-            lookup.get(value, value) if lookup else value)
+        return (
+            lookup_for_param.get(value, value)
+            if lookup_for_param
+            else (lookup.get(value, value) if lookup else value)
+        )
 
     # Convert from platform format
 
@@ -1398,14 +1673,14 @@ class ProtocolConverter:
         if data is None or data == []:
             self.logger.debug(
                 "Data argument is empty in parse(). endpoint: %s, data: %s",
-                endpoint, data)
+                endpoint,
+                data,
+            )
             return data
 
         # (If list of items data, but not an item data as a list)
         if isinstance(data, list):  # and not isinstance(data[0], list):
-            result = [
-                self._parse_item(endpoint, item_data) for item_data in data
-            ]
+            result = [self._parse_item(endpoint, item_data) for item_data in data]
             # (Skip empty)
             result = [item for item in result if item]
             return result
@@ -1414,9 +1689,12 @@ class ProtocolConverter:
 
     def _parse_item(self, endpoint, item_data):
         # Check item_class by endpoint
-        if not endpoint or not self.item_class_by_endpoint or endpoint not in self.item_class_by_endpoint:
-            self.logger.warning("Wrong endpoint: %s in parse_item().",
-                                endpoint)
+        if (
+            not endpoint
+            or not self.item_class_by_endpoint
+            or endpoint not in self.item_class_by_endpoint
+        ):
+            self.logger.warning("Wrong endpoint: %s in parse_item().", endpoint)
             return item_data
         item_class = self.item_class_by_endpoint[endpoint]
 
@@ -1434,8 +1712,9 @@ class ProtocolConverter:
         if hasattr(item, ParamName.SYMBOL) and item.symbol:
             item.symbol = item.symbol.upper()
             if self.symbol_delimiter:
-                item.symbol = item.symbol.replace(self.symbol_delimiter,
-                                                  Currency.DELIMITER)
+                item.symbol = item.symbol.replace(
+                    self.symbol_delimiter, Currency.DELIMITER
+                )
         # Stringify item_id
         if hasattr(item, ParamName.ITEM_ID) and item.item_id is not None:
             item.item_id = str(item.item_id)
@@ -1446,8 +1725,7 @@ class ProtocolConverter:
         # (Note: add here more timestamp attributes if you use another name in your VOs)
         if hasattr(item, self.ITEM_TIMESTAMP_ATTR):
             if item.timestamp:
-                item.timestamp = self._convert_timestamp_from_platform(
-                    item.timestamp)
+                item.timestamp = self._convert_timestamp_from_platform(item.timestamp)
             item.is_milliseconds = self.use_milliseconds
 
         # Convert asks and bids to OrderBookItem type
@@ -1491,8 +1769,7 @@ class ProtocolConverter:
         if value:
             if isinstance(result, list):
                 for item in result:
-                    if hasattr(item,
-                               param_name) and not getattr(item, param_name):
+                    if hasattr(item, param_name) and not getattr(item, param_name):
                         setattr(item, param_name, value)
             else:
                 if hasattr(result, param_name):
@@ -1504,15 +1781,20 @@ class ProtocolConverter:
             return None
 
         result = self._create_and_set_up_object(Error, error_data) or Error()
-        response_message = " (status: %s %s code: %s msg: %s)" % (
-            response.status_code, response.reason, result.code, result.message) if response \
+        response_message = (
+            " (status: %s %s code: %s msg: %s)"
+            % (response.status_code, response.reason, result.code, result.message)
+            if response
             else " (code: %s msg: %s)" % (result.code, result.message)
+        )
         if not result.code:
             result.code = response.status_code
-        result.code = self.error_code_by_platform_error_code.get(result.code, result.code) \
-            if self.error_code_by_platform_error_code else result.code
-        result.message = ErrorCode.get_message_by_code(
-            result.code) + response_message
+        result.code = (
+            self.error_code_by_platform_error_code.get(result.code, result.code)
+            if self.error_code_by_platform_error_code
+            else result.code
+        )
+        result.message = ErrorCode.get_message_by_code(result.code) + response_message
         return result
 
     def _create_and_set_up_object(self, object_class, data):
@@ -1520,16 +1802,19 @@ class ProtocolConverter:
             return None
 
         obj = object_class()
-        lookup = self.param_lookup_by_class.get(
-            object_class) if self.param_lookup_by_class else None
+        lookup = (
+            self.param_lookup_by_class.get(object_class)
+            if self.param_lookup_by_class
+            else None
+        )
         if not lookup:
             # self.logger.error("There is no lookup for %s in %s", object_class, self.__class__)
-            raise Exception("There is no lookup for %s in %s" %
-                            (object_class, self.__class__))
+            raise Exception(
+                "There is no lookup for %s in %s" % (object_class, self.__class__)
+            )
         # (Lookup is usually a dict, but can be a list when item_data is a list)
         if lookup:
-            key_pair = lookup.items() if isinstance(
-                lookup, dict) else enumerate(lookup)
+            key_pair = lookup.items() if isinstance(lookup, dict) else enumerate(lookup)
             is_data_dict = isinstance(data, dict)
             for platform_key, key in key_pair:
                 if key and (not is_data_dict or platform_key in data):
@@ -1537,14 +1822,20 @@ class ProtocolConverter:
                     value = data[platform_key]
                     # if isinstance(value, float):
                     #     value = Decimal(value)
-                    lookup = self.param_value_reversed_lookup.get(key) if key in self.param_value_reversed_lookup else \
-                        self.param_value_reversed_lookup
-                    value = lookup.get(value,
-                                       value) if lookup and not isinstance(
-                                           value, list) else value
+                    lookup = (
+                        self.param_value_reversed_lookup.get(key)
+                        if key in self.param_value_reversed_lookup
+                        else self.param_value_reversed_lookup
+                    )
+                    value = (
+                        lookup.get(value, value)
+                        if lookup and not isinstance(value, list)
+                        else value
+                    )
 
-                    if value is not None and value != "" and ParamName.is_decimal(
-                            key):  # key in self.decimal_param_names:
+                    if (
+                        value is not None and value != "" and ParamName.is_decimal(key)
+                    ):  # key in self.decimal_param_names:
                         value = Decimal(value)
                     setattr(obj, key, value)
 
@@ -1555,9 +1846,13 @@ class ProtocolConverter:
     def _convert_timestamp_values_to_platform(self, endpoint, platform_params):
         if not platform_params:
             return
-        timestamp_platform_names = self.timestamp_platform_names_by_endpoint.get(
-            endpoint, self.timestamp_platform_names) \
-            if self.timestamp_platform_names_by_endpoint else self.timestamp_platform_names
+        timestamp_platform_names = (
+            self.timestamp_platform_names_by_endpoint.get(
+                endpoint, self.timestamp_platform_names
+            )
+            if self.timestamp_platform_names_by_endpoint
+            else self.timestamp_platform_names
+        )
         if not timestamp_platform_names:
             return
 
@@ -1566,8 +1861,7 @@ class ProtocolConverter:
                 value = platform_params[name]
                 if isinstance(value, ValueObject):
                     value = getattr(value, self.ITEM_TIMESTAMP_ATTR, value)
-                platform_params[name] = self._convert_timestamp_to_platform(
-                    value)
+                platform_params[name] = self._convert_timestamp_to_platform(value)
 
     def _convert_timestamp_to_platform(self, timestamp):
         if not timestamp:
@@ -1577,7 +1871,7 @@ class ProtocolConverter:
             timestamp /= 1000
 
         if self.is_source_in_milliseconds:
-            timestamp *= 1000
+            timestamp = round(timestamp * 1000)
         elif self.is_source_in_timestring:
             dt = datetime.utcfromtimestamp(timestamp)
             timestamp = dt.isoformat()
@@ -1655,7 +1949,8 @@ class BaseClient:
         # Create logger
         platform_name = Platform.get_platform_name_by_id(self.platform_id)
         self.logger = logging.getLogger(
-            "%s.%s.v%s" % (self._log_prefix, platform_name, self.version))
+            "%s.%s.v%s" % (self._log_prefix, platform_name, self.version)
+        )
         # self.logger.debug("Create %s client for %s platform. url+params: %s",
         #                   self._log_prefix, platform_name, self.make_url_and_platform_params())
 
@@ -1664,14 +1959,11 @@ class BaseClient:
         if not self.converter:
             raise Exception(
                 "There is no converter_class in %s for version: %s. May be wrong version."
-                % (self.__class__, self.version))
+                % (self.__class__, self.version)
+            )
 
     # TODO add passphrase into credentials
-    def set_credentials(self,
-                        api_key,
-                        api_secret,
-                        passphrase=None,
-                        credentials=None):
+    def set_credentials(self, api_key, api_secret, passphrase=None, credentials=None):
         self._api_key = api_key
         self._api_secret = api_secret
         self._passphrase = passphrase
@@ -1682,8 +1974,11 @@ class BaseClient:
     def _apply_credentials(self):
         if self._credentials:
             # Needed for cases when credentials could change during application
-            credentials = self._credentials() if callable(
-                self._credentials) else self._credentials
+            credentials = (
+                self._credentials()
+                if callable(self._credentials)
+                else self._credentials
+            )
             if credentials:
                 if len(credentials) < 3:
                     self._api_key, self._api_secret = credentials
@@ -1706,14 +2001,18 @@ class BaseClient:
             return self._converter_by_version[version]
 
         # Get class
-        converter_class = self._converter_class_by_version.get(version) \
-            if self._converter_class_by_version else self.default_converter_class
+        converter_class = (
+            self._converter_class_by_version.get(version)
+            if self._converter_class_by_version
+            else self.default_converter_class
+        )
         # Note: platform_id could be set in converter or in client
         if not self.platform_id:
             self.platform_id = converter_class.platform_id
         # Create and store
-        converter = converter_class(self.platform_id,
-                                    version) if converter_class else None
+        converter = (
+            converter_class(self.platform_id, version) if converter_class else None
+        )
         self._converter_by_version[version] = converter
 
         return converter
@@ -1735,12 +2034,15 @@ class RESTConverter(ProtocolConverter):
     # sorting values: ASCENDING, DESCENDING (newest first), None
     # DEFAULT_SORTING = Param.ASCENDING  # Const for current platform. See in param_name_lookup
     # todo rename to IS_SORTING_SUPPORTED
-    IS_SORTING_ENABLED = False  # False - SORTING param is not supported for current platform
+    IS_SORTING_ENABLED = (
+        False
+    )  # False - SORTING param is not supported for current platform
     sorting = Sorting.DESCENDING  # Choose default sorting for all requests
 
     sorting_endpoints = [
         Endpoint.TRADE,
         Endpoint.TRADE_MY,
+        Endpoint.ORDERS_ALL,
         Endpoint.TRADE_HISTORY,
         Endpoint.TRADE_MY_HISTORY,
         Endpoint.CANDLE,
@@ -1766,9 +2068,7 @@ class RESTConverter(ProtocolConverter):
     ]
 
     # endpoint -> endpoint (if has different endpoint for history)
-    history_endpoint_lookup = {
-        Endpoint.TRADE: Endpoint.TRADE_HISTORY,
-    }
+    history_endpoint_lookup = {Endpoint.TRADE: Endpoint.TRADE_HISTORY}
 
     # endpoint -> platform_endpoint
     # Note: XXX_HISTORY should be always set if XXX is set (XXX is subset of XXX_HISTORY)
@@ -1796,19 +2096,29 @@ class RESTConverter(ProtocolConverter):
         # (If LIMIT param is set to None (expected, but not defined))
         is_use_max_limit = self.is_use_max_limit or (
             params.pop(ParamName.IS_USE_MAX_LIMIT)
-            if params and ParamName.IS_USE_MAX_LIMIT in params else False)
+            if params and ParamName.IS_USE_MAX_LIMIT in params
+            else False
+        )
         is_limit_supported_here = params and ParamName.LIMIT in params
-        if is_use_max_limit and is_limit_supported_here and params[
-                ParamName.LIMIT] is None:
-            value = self.max_limit_by_endpoint.get(
-                endpoint, 1000000) if self.max_limit_by_endpoint else None
+        if (
+            is_use_max_limit
+            and is_limit_supported_here
+            and params[ParamName.LIMIT] is None
+        ):
+            value = (
+                self.max_limit_by_endpoint.get(endpoint, 1000000)
+                if self.max_limit_by_endpoint
+                else None
+            )
             if value is not None:
                 # Set limit to maximum supported by a platform
                 params[ParamName.LIMIT] = value
 
     def _process_sorting_param(self, endpoint, params):
         # (Add only if a platform supports it, and it is not already added)
-        is_sorting_available = self.IS_SORTING_ENABLED and endpoint in self.sorting_endpoints
+        is_sorting_available = (
+            self.IS_SORTING_ENABLED and endpoint in self.sorting_endpoints
+        )
 
         if not is_sorting_available and ParamName.SORTING in params:
             del params[ParamName.SORTING]
@@ -1825,14 +2135,15 @@ class RESTConverter(ProtocolConverter):
         to_item = params.get(ParamName.TO_ITEM)
         is_descending = self._get_real_sorting(params) == Sorting.DESCENDING
 
-        if not from_item or not to_item or not params:  # or not self.IS_SORTING_ENABLED:
+        if (
+            not from_item or not to_item or not params
+        ):  # or not self.IS_SORTING_ENABLED:
             return
 
         # (from_item <-> to_item)
         # is_from_newer_than_to = getattr(from_item, self.ITEM_TIMESTAMP_ATTR, 0) > \
         #                         getattr(to_item, self.ITEM_TIMESTAMP_ATTR, 0)
-        is_from_newer_than_to = (from_item.timestamp or 0) > (to_item.timestamp
-                                                              or 0)
+        is_from_newer_than_to = (from_item.timestamp or 0) > (to_item.timestamp or 0)
 
         # TODO: from_item should be greater than to_item for desc sorting
         # (read comments at test_fetch_history_from_and_to_item)
@@ -1846,39 +2157,48 @@ class RESTConverter(ProtocolConverter):
             del params[ParamName.FROM_ITEM]
 
     def _process_id_params(self, endpoint, params):
-        ID_PARAM_NAMES = [
-            ParamName.ITEM_ID, ParamName.ORDER_ID, ParamName.TRADE_ID
-        ]
+        ID_PARAM_NAMES = [ParamName.ITEM_ID, ParamName.ORDER_ID, ParamName.TRADE_ID]
         for id_param_name in ID_PARAM_NAMES:
             # Convert item to item.item_id
             item = params.get(id_param_name)
             if item and isinstance(item, ItemObject):
                 params[id_param_name] = item.item_id
 
-    def process_secured(self,
-                        method,
-                        url,
-                        endpoint,
-                        platform_params,
-                        headers,
-                        api_key,
-                        api_secret,
-                        passphrase=None):
+    def process_secured(
+        self,
+        method,
+        url,
+        endpoint,
+        platform_params,
+        headers,
+        api_key,
+        api_secret,
+        passphrase=None,
+    ):
         if endpoint in self.secured_endpoints:
             platform_params, headers = self._generate_and_add_signature(
-                method, url, endpoint, platform_params, headers, api_key,
-                api_secret, passphrase)
+                method,
+                url,
+                endpoint,
+                platform_params,
+                headers,
+                api_key,
+                api_secret,
+                passphrase,
+            )
         return url, platform_params, headers
 
-    def _generate_and_add_signature(self,
-                                    method,
-                                    url,
-                                    endpoint,
-                                    platform_params,
-                                    headers,
-                                    api_key,
-                                    api_secret,
-                                    passphrase=None):
+    def _generate_and_add_signature(
+        self,
+        method,
+        url,
+        endpoint,
+        platform_params,
+        headers,
+        api_key,
+        api_secret,
+        passphrase=None,
+    ):
         # Generate and add signature here
         return platform_params, headers
 
@@ -1892,45 +2212,44 @@ class RESTConverter(ProtocolConverter):
         # (for example, for Binance which doesn't have to_id param for trade history)
         from_item = params.get(ParamName.FROM_ITEM)
         to_item = params.get(ParamName.TO_ITEM)
-        from_time = time_util.get_timestamp(
-            from_item.timestamp, self.use_milliseconds) if from_item else None
-        to_time = time_util.get_timestamp(
-            to_item.timestamp, self.use_milliseconds) if to_item else None
+        from_time = (
+            time_util.get_timestamp(from_item.timestamp, self.use_milliseconds)
+            if from_item
+            else None
+        )
+        to_time = (
+            time_util.get_timestamp(to_item.timestamp, self.use_milliseconds)
+            if to_item
+            else None
+        )
         # (For binance - items from queue in sec (ms truncated) and from platform in ms)
         if to_time is not None:
             to_time += 1000 if self.use_milliseconds else 1
 
         if from_item or to_item:
             # Filter result by from and to items
-            filtered_result = self._filter_result(result, from_item, to_item,
-                                                  from_time, to_time)
-
+            filtered_result = self._filter_result(result, from_item, to_item, from_time, to_time)
             if len(result) != len(filtered_result):
-                log_method = self.logger.warning if len(
-                    filtered_result) == 0 else self.logger.debug
+                log_method = (
+                    self.logger.warning
+                    if len(filtered_result) == 0
+                    else self.logger.debug
+                )
                 log_method(
                     "Filtering result: %s to %s items with from_item: %s and to_item: %s",
-                    log_util.items_to_interval_string(result), len(result),
-                    from_item, to_item)
+                    log_util.items_to_interval_string(result),
+                    len(result),
+                    from_item,
+                    to_item,
+                )
             result = filtered_result
 
         return result
 
-    def _filter_result(self,
-                       result,
-                       from_item=None,
-                       to_item=None,
-                       from_time=None,
+    def _filter_result(self, result, from_item=None, to_item=None, from_time=None,
                        to_time=None):
-        # result = [item for item in result if
-        #           (not from_time or item.timestamp >= from_time) and
-        #           (not to_time or item.timestamp <= to_time)
-        #           ]
-        # return result
-
         filtered_result = []
-        start_index = result.index(
-            from_item) if from_item and from_item in result else -1
+        start_index = (result.index(from_item) if from_item and from_item in result else -1)
         for item in result[start_index:] if start_index > 0 else result:
             if not from_time or item.timestamp >= from_time:
                 filtered_result.append(item)
@@ -1956,10 +2275,7 @@ class BaseRESTClient(BaseClient):
 
     @property
     def headers(self):
-        return {
-            "Accept": "application/json",
-            "User-Agent": "client/python",
-        }
+        return {"Accept": "application/json", "User-Agent": "client/python"}
 
     def __init__(self, version=None, **kwargs) -> None:
         super().__init__(version, **kwargs)
@@ -1972,12 +2288,7 @@ class BaseRESTClient(BaseClient):
 
     # todo tests
     # Single entry point for all endpoints
-    def fetch(self,
-              endpoint,
-              symbols=None,
-              params=None,
-              version=None,
-              **kwargs):
+    def fetch(self, endpoint, symbols=None, params=None, version=None, **kwargs):
         result = []
         if symbols is None:
             symbols = [None]
@@ -1987,17 +2298,20 @@ class BaseRESTClient(BaseClient):
             item_params = {ParamName.SYMBOL: symbol}
             if params:
                 item_params.update(params)
-            request_result = self._send("GET", endpoint, item_params, version,
-                                        **kwargs) or []
+            request_result = (
+                self._send("GET", endpoint, item_params, version, **kwargs) or []
+            )
             if isinstance(request_result, list):
                 result += request_result
             else:
                 result.append(request_result)
         self.logger.debug(
             "Fetch endpoint: %s symbols: %s params: %s result: %s %s .. %s",
-            endpoint, symbols, params,
-            *((len(result), result[0], result[-1]) if result else
-              (0, None, None)))
+            endpoint,
+            symbols,
+            params,
+            *((len(result), result[0], result[-1]) if result else (0, None, None)),
+        )
         return result
 
     def _send(self, method, endpoint, params=None, version=None, **kwargs):
@@ -2018,14 +2332,23 @@ class BaseRESTClient(BaseClient):
         # todo save initial symbol (before it will be converted to platform symbol in converter)
         params = converter.preprocess_params(endpoint, params)
         self.logger.debug(
-            "(Sending: %s %s %s %s)", method, endpoint, params, "version: " +
-            version if version and self.version != version else "")
+            "(Sending: %s %s %s %s)",
+            method,
+            endpoint,
+            params,
+            "version: " + version if version and self.version != version else "",
+        )
         url, platform_params = converter.make_url_and_platform_params(
-            endpoint, params, version=version)
+            endpoint, params, version=version
+        )
         if not url:
             self.logger.error(
                 "No url: %s for endpoint: %s params: %s (-> platform_params: %s)",
-                url, endpoint, params, platform_params)
+                url,
+                endpoint,
+                params,
+                platform_params,
+            )
             return None
         if not method:
             self.logger.error("No method defined: %s", method)
@@ -2033,8 +2356,15 @@ class BaseRESTClient(BaseClient):
 
         # Add signature
         url, platform_params, headers = converter.process_secured(
-            method, url, endpoint, platform_params, self.headers,
-            self._api_key, self._api_secret, self._passphrase)
+            method,
+            url,
+            endpoint,
+            platform_params,
+            self.headers,
+            self._api_key,
+            self._api_secret,
+            self._passphrase,
+        )
 
         # Send
         kwargs = {"headers": headers}
@@ -2052,16 +2382,17 @@ class BaseRESTClient(BaseClient):
 
         if not self._is_response_error(response, data_json, data_text):
             result = converter.parse(endpoint, data_json)
-            result = converter.post_process_result(result, method, endpoint,
-                                                   params)
+            result = converter.post_process_result(result, method, endpoint, params)
         else:
-            self.logger.error("Send to exchange failed. m: %s, u: %s, k: %s",
-                              method, url, kwargs)
+            self.logger.error(
+                "Send to exchange failed. m: %s, u: %s, k: %s", method, url, kwargs
+            )
             result = converter.parse_error(
-                data_json if data_json else data_text, response)
+                data_json if data_json else data_text, response
+            )
         # todo use initial symbol saved earlier if it was changed in converter to platform symbol
         self.logger.debug(
-            "Response: %s %s\n Parsed result: %s",
+            "Response: %s %s\nParsed result: %s",
             response,
             log_util.make_short_str(response.content, self.max_log_len),
             # response.content,  # temp
@@ -2081,8 +2412,9 @@ class BaseRESTClient(BaseClient):
             data_json = response.json(parse_float=Decimal)
         except json.JSONDecodeError as err:
             data_json = None
-            self.logger.error('JSONDecodeError: %s (response content: %s)',
-                              err, response.content)
+            self.logger.error(
+                "JSONDecodeError: %s (response content: %s)", err, response.content
+            )
         data_text = response.text
         return data_json, data_text
 
@@ -2130,6 +2462,7 @@ class PlatformRESTClient(BaseRESTClient):
     Закомментированные методы скорее всего не понадобятся, но на всякий случай они добавлены,
     чтобы потом не возвращаться и не думать заново.
     """
+
     # Settings
     is_futures = False
 
@@ -2138,24 +2471,21 @@ class PlatformRESTClient(BaseRESTClient):
     _symbols = None
 
     fetch_method_by_endpoint = {
-        Endpoint.CURRENCY_PAIRS: 'fetch_currency_pairs',
-        Endpoint.SYMBOLS: 'fetch_symbols',
-        Endpoint.TRADE: 'fetch_trades',
-        Endpoint.CANDLE: 'fetch_candles',
-        Endpoint.TICKER: 'fetch_ticker',
-        Endpoint.TICKER_ALL: 'fetch_tickers',
-        Endpoint.ORDER_BOOK: 'fetch_order_book',
-        Endpoint.QUOTE: 'fetch_quote',
+        Endpoint.CURRENCY_PAIRS: "fetch_currency_pairs",
+        Endpoint.SYMBOLS: "fetch_symbols",
+        Endpoint.TRADE: "fetch_trades",
+        Endpoint.CANDLE: "fetch_candles",
+        Endpoint.TICKER: "fetch_ticker",
+        Endpoint.TICKER_ALL: "fetch_tickers",
+        Endpoint.ORDER_BOOK: "fetch_order_book",
+        Endpoint.QUOTE: "fetch_quote",
     }
 
     def ping(self, version=None, **kwargs):
         endpoint = Endpoint.PING
         return self._send("GET", endpoint, version=version, **kwargs)
 
-    def get_server_timestamp(self,
-                             force_from_server=False,
-                             version=None,
-                             **kwargs):
+    def get_server_timestamp(self, force_from_server=False, version=None, **kwargs):
         endpoint = Endpoint.SERVER_TIME
 
         if not force_from_server and self._server_time_diff_s is not None:
@@ -2170,8 +2500,9 @@ class PlatformRESTClient(BaseRESTClient):
             return result
         if result:
             # (Update time diff)
-            self._server_time_diff_s = (result / 1000 if self.use_milliseconds else
-                                        result) - time_before
+            self._server_time_diff_s = (
+                result / 1000 if self.use_milliseconds else result
+            ) - time_before
         return result
 
     def call_fetch_by_endpoint(self, endpoint, **kwargs):
@@ -2180,7 +2511,7 @@ class PlatformRESTClient(BaseRESTClient):
 
     def fetch_currency_pairs(self, version=None, **kwargs):
         endpoint = Endpoint.CURRENCY_PAIRS
-        return self._send("GET", endpoint, version=version,**kwargs)
+        return self._send("GET", endpoint, version=version, **kwargs)
 
     def get_symbols(self, force_fetching=False, version=None, **kwargs):
         if not self._symbols or force_fetching:
@@ -2197,24 +2528,29 @@ class PlatformRESTClient(BaseRESTClient):
         else:
             return response
 
-    def fetch_history(self,
-                      endpoint,
-                      symbol,
-                      limit=None,
-                      from_item=None,
-                      to_item=None,
-                      sorting=None,
-                      is_use_max_limit=False,
-                      from_time=None,
-                      to_time=None,
-                      version=None,
-                      **kwargs):
+    def fetch_history(
+        self,
+        endpoint,
+        symbol,
+        limit=None,
+        from_item=None,
+        to_item=None,
+        sorting=None,
+        is_use_max_limit=False,
+        from_time=None,
+        to_time=None,
+        version=None,
+        **kwargs,
+    ):
         # Common method for fetching history for any endpoint. Used in REST connector.
 
         # (Convert endpoint to history endpoint if they differ)
         history_endpoint_lookup = self.converter.history_endpoint_lookup
-        endpoint = history_endpoint_lookup.get(
-            endpoint, endpoint) if history_endpoint_lookup else endpoint
+        endpoint = (
+            history_endpoint_lookup.get(endpoint, endpoint)
+            if history_endpoint_lookup
+            else endpoint
+        )
         params = {
             ParamName.SYMBOL: symbol,
             ParamName.LIMIT: limit,
@@ -2226,8 +2562,9 @@ class PlatformRESTClient(BaseRESTClient):
             ParamName.TO_TIME: to_time,
         }
 
-        self.logger.debug("fetch_history from: %s to: %s", from_item
-                          or from_time, to_item or to_time)
+        self.logger.debug(
+            "fetch_history from: %s to: %s", from_item or from_time, to_item or to_time
+        )
         result = self._send("GET", endpoint, params, version, **kwargs)
         return result
 
@@ -2237,45 +2574,56 @@ class PlatformRESTClient(BaseRESTClient):
         # Fetch current (last) trades to display at once.
 
         endpoint = Endpoint.TRADE
-        params = {
-            ParamName.SYMBOL: symbol,
-            ParamName.LIMIT: limit,
-        }
+        params = {ParamName.SYMBOL: symbol, ParamName.LIMIT: limit}
 
         result = self._send("GET", endpoint, params, version, **kwargs)
         return result
 
-    def fetch_trades_history(self,
-                             symbol,
-                             limit=None,
-                             from_item=None,
-                             to_item=None,
-                             sorting=None,
-                             is_use_max_limit=False,
-                             from_time=None,
-                             to_time=None,
-                             version=None,
-                             **kwargs):
+    def fetch_trades_history(
+        self,
+        symbol,
+        limit=None,
+        from_item=None,
+        to_item=None,
+        sorting=None,
+        is_use_max_limit=False,
+        from_time=None,
+        to_time=None,
+        version=None,
+        **kwargs,
+    ):
         # Fetching whole trades history as much as possible.
         # from_time and to_time used along with from_item and to_item as we often need to fetch
         # history by time and only Binance (as far as I know) doesn't support that (only by id)
 
-        return self.fetch_history(Endpoint.TRADE, symbol, limit, from_item,
-                                  to_item, sorting, is_use_max_limit,
-                                  from_time, to_time, version, **kwargs)
+        return self.fetch_history(
+            Endpoint.TRADE,
+            symbol,
+            limit,
+            from_item,
+            to_item,
+            sorting,
+            is_use_max_limit,
+            from_time,
+            to_time,
+            version,
+            **kwargs,
+        )
 
     # Candle
 
     # todo sorting
-    def fetch_candles(self,
-                      symbol,
-                      interval,
-                      limit=None,
-                      from_time=None,
-                      to_time=None,
-                      is_use_max_limit=False,
-                      version=None,
-                      **kwargs):
+    def fetch_candles(
+        self,
+        symbol,
+        interval,
+        limit=None,
+        from_time=None,
+        to_time=None,
+        is_use_max_limit=False,
+        version=None,
+        **kwargs,
+    ):
         endpoint = Endpoint.CANDLE
         params = {
             ParamName.SYMBOL: symbol,
@@ -2296,9 +2644,7 @@ class PlatformRESTClient(BaseRESTClient):
         #     return symbol
 
         endpoint = Endpoint.TICKER
-        params = {
-            ParamName.SYMBOL: symbol,
-        }
+        params = {ParamName.SYMBOL: symbol}
 
         result = self._send("GET", endpoint, params, version, **kwargs)
         return result
@@ -2314,27 +2660,22 @@ class PlatformRESTClient(BaseRESTClient):
 
         if symbols:
             # Filter result for symbols defined
-            symbols = [
-                symbol.upper() if symbol else symbol for symbol in symbols
-            ]
+            symbols = [symbol.upper() if symbol else symbol for symbol in symbols]
             return [item for item in result if item.symbol in symbols]
 
         return result
 
     # Order Book
 
-    def fetch_order_book(self,
-                         symbol=None,
-                         limit=None,
-                         is_use_max_limit=False,
-                         version=None,
-                         **kwargs):
+    def fetch_order_book(
+        self, symbol=None, limit=None, is_use_max_limit=False, version=None, **kwargs
+    ):
         # Level 2 (price-aggregated) order book for a particular symbol.
 
         endpoint = Endpoint.ORDER_BOOK
         params = {
             ParamName.SYMBOL: symbol,
-            ParamName.LIMIT: limit,
+            ParamName.LEVEL: limit,
         }
 
         result = self._send("GET", endpoint, params, version, **kwargs)
@@ -2342,9 +2683,7 @@ class PlatformRESTClient(BaseRESTClient):
 
     def fetch_quote(self, symbol: str = None, version: str = None, **kwargs):
         endpoint = Endpoint.QUOTE
-        params = {
-            ParamName.SYMBOL: symbol,
-        }
+        params = {ParamName.SYMBOL: symbol}
         result = self._send("GET", endpoint, params, version, **kwargs)
         return result
 
@@ -2359,26 +2698,32 @@ class PrivatePlatformRESTClient(PlatformRESTClient):
     supported_order_types = (OrderType.LIMIT, OrderType.MARKET)
 
     fetch_method_by_endpoint = PlatformRESTClient.fetch_method_by_endpoint
-    fetch_method_by_endpoint.update({
-        Endpoint.BALANCE: 'fetch_balance',
-        Endpoint.POSITION: 'get_positions',
-        Endpoint.TRADE_MY: 'fetch_my_trades',
-        Endpoint.ORDER: 'fetch_orders',
-    })
+    fetch_method_by_endpoint.update(
+        {
+            Endpoint.BALANCE: "fetch_balance",
+            Endpoint.POSITION: "get_positions",
+            Endpoint.TRADE_MY: "fetch_my_trades",
+            Endpoint.ORDER: "fetch_orders",
+        }
+    )
 
-    def __init__(self,
-                 api_key=None,
-                 api_secret=None,
-                 passphrase=None,
-                 version=None,
-                 credentials=None,
-                 **kwargs) -> None:
+    def __init__(
+        self,
+        api_key=None,
+        api_secret=None,
+        passphrase=None,
+        version=None,
+        credentials=None,
+        **kwargs,
+    ) -> None:
         super().__init__(version=version, **kwargs)
         self.set_credentials(api_key, api_secret, passphrase, credentials)
 
-
     def _send(self, method, endpoint, params=None, version=None, **kwargs):
-        if endpoint == Endpoint.BALANCE_TRANSACTION and not self.is_balance_transactions_supported:
+        if (
+            endpoint == Endpoint.BALANCE_TRANSACTION
+            and not self.is_balance_transactions_supported
+        ):
             return None
         return super()._send(method, endpoint, params, version, **kwargs)
 
@@ -2389,21 +2734,17 @@ class PrivatePlatformRESTClient(PlatformRESTClient):
         params = {}
 
         result = self._send("GET", endpoint, params, version, **kwargs)
-        is_list_error = isinstance(
-            result, list) and len(result) > 0 and isinstance(result[0], Error)
+        is_list_error = (
+            isinstance(result, list)
+            and len(result) > 0
+            and isinstance(result[0], Error)
+        )
         return not (isinstance(result, Error) or is_list_error)
 
     def set_leverage(self, leverage, symbol=None, version=None, **kwargs):
         endpoint = Endpoint.LEVERAGE_SET
-        params = {
-            ParamName.LEVERAGE: leverage,
-            ParamName.SYMBOL: symbol,
-        }
-        result = self._send("POST",
-                            endpoint,
-                            params,
-                            version=version,
-                            **kwargs)
+        params = {ParamName.LEVERAGE: leverage, ParamName.SYMBOL: symbol}
+        result = self._send("POST", endpoint, params, version=version, **kwargs)
         return result
 
     def get_account_info(self, version=None, **kwargs):
@@ -2423,35 +2764,31 @@ class PrivatePlatformRESTClient(PlatformRESTClient):
         result = self._send("GET", endpoint, params, version, **kwargs)
         return result
 
-    def fetch_balance_transactions(self,
-                                   limit=None,
-                                   page=None,
-                                   is_only_by_user=False,
-                                   version=None,
-                                   **kwargs):
+    def fetch_balance_transactions(
+        self, limit=None, page=None, from_time=None, to_time=None, is_direct=False, version=None, **kwargs
+    ):
         # Balance included to account
         endpoint = Endpoint.BALANCE_TRANSACTION
         params = {
             ParamName.LIMIT: limit,
-            ParamName.LIMIT_SKIP: limit * page if limit and page else None
+            ParamName.LIMIT_SKIP: limit * page if limit and page else None,
+            ParamName.FROM_TIME: from_time,
+            ParamName.TO_TIME: to_time,
         }
-        # params = {}
 
         result = self._send("GET", endpoint, params, version, **kwargs)
-        if is_only_by_user and isinstance(result, list):
+        if is_direct and isinstance(result, list):
             result = [
-                item for item in result if
-                TransactionType.check_is_created_by_user(item.transaction_type)
+                item
+                for item in result
+                if TransactionType.check_is_direct(item.transaction_type)
             ]
 
         return result
 
-    def fetch_my_trades(self,
-                        symbol,
-                        limit=None,
-                        from_item=None,
-                        version=None,
-                        **kwargs):
+    def fetch_my_trades(
+        self, symbol, limit=None, from_item=None, version=None, **kwargs
+    ):
         endpoint = Endpoint.TRADE_MY
         params = {
             ParamName.SYMBOL: symbol,
@@ -2462,19 +2799,12 @@ class PrivatePlatformRESTClient(PlatformRESTClient):
         result = self._send("GET", endpoint, params, version, **kwargs)
         return result
 
-    # def fetch_my_trades_history(self, symbol, limit=None, from_item=None, to_item=None,
-    #                             sorting=None, is_use_max_limit=False, version=None, **kwargs):
-    #     pass
-
     # Order (private)
-    def _adjsut_order_parameters(self,
-                                 symbol,
-                                 amount,
-                                 price=None,
-                                 price_stop=None,
-                                 price_limit=None):
-        assert (symbol and amount)
-        assert (price is not None or (price_limit or price_stop))
+    def _adjsut_order_parameters(
+        self, symbol, amount, price=None, price_stop=None, price_limit=None
+    ):
+        assert symbol and amount
+        assert price is not None or (price_limit or price_stop)
         symbol: CurrencyPair = self.helper.get_currency_pair(self.platform_id, symbol)
         assert symbol
         if not (symbol.lot_step and symbol.price_step):
@@ -2484,51 +2814,55 @@ class PrivatePlatformRESTClient(PlatformRESTClient):
         if symbol.min_notional and amount < symbol.min_notional:
             self.logger.warning(
                 "Order amount %s less than minimal notional filter %s.",
-                amount, symbol.min_notional)
+                amount,
+                symbol.min_notional,
+            )
         if price:
-            price = dtz(
-                int(Decimal(price) / symbol.price_step) * symbol.price_step)
+            price = dtz(int(Decimal(price) / symbol.price_step) * symbol.price_step)
         if price_stop:
             price_stop = dtz(
-                int(Decimal(price_stop) / symbol.price_step) *
-                symbol.price_step)
+                int(Decimal(price_stop) / symbol.price_step) * symbol.price_step
+            )
         if price_limit:
             price_limit = dtz(
-                int(Decimal(price_limit) / symbol.price_step) *
-                symbol.price_step)
+                int(Decimal(price_limit) / symbol.price_step) * symbol.price_step
+            )
         return str(amount), str(price), str(price_stop), str(price_limit)
 
     # todo add volume=None as amount*price. Price or volume will be used and converted to each other
     #  (for BitMEX volume is used instead of price)
-    def create_order(self,
-                     symbol,
-                     order_type,
-                     direction,
-                     amount=None,
-                     price=None,
-                     is_test=False,
-                     price_stop=None,
-                     price_limit=None,
-                     version=None,
-                     **kwargs):
+    def create_order(
+        self,
+        symbol,
+        order_type,
+        direction,
+        amount=None,
+        price=None,
+        is_test=False,
+        price_stop=None,
+        price_limit=None,
+        version=None,
+        **kwargs,
+    ):
         if order_type not in self.supported_order_types:
             msg = "Not supported order type %s" % OrderType.name_by_value.get(
-                order_type)
+                order_type
+            )
             self.logger.error(msg)
             return Error(code=ErrorCode.WRONG_PARAM, message=msg)
         endpoint = Endpoint.ORDER_TEST if is_test else Endpoint.ORDER_CREATE
         amount, price, price_stop, price_limit = self._adjsut_order_parameters(
-            symbol, amount, price, price_stop, price_limit)
+            symbol, amount, price, price_stop, price_limit
+        )
         params_base = {
             ParamName.SYMBOL: symbol,
             ParamName.ORDER_TYPE: order_type,
             ParamName.DIRECTION: direction,
-            ParamName.AMOUNT: amount
+            ParamName.AMOUNT: amount,
         }
         if order_type in [OrderType.MARKET, OrderType.LIMIT]:
             params_extra = {
-                ParamName.PRICE:
-                price if order_type == OrderType.LIMIT else None,
+                ParamName.PRICE: price if order_type == OrderType.LIMIT else None
             }
         else:
             params_extra = {
@@ -2536,27 +2870,22 @@ class PrivatePlatformRESTClient(PlatformRESTClient):
                 ParamName.PRICE_LIMIT: price_limit,
             }
         params = {**params_base, **params_extra}
-        result = self._send("POST",
-                            endpoint,
-                            params,
-                            version=version,
-                            **kwargs)
+        result = self._send("POST", endpoint, params, version=version, **kwargs)
         return result
 
     def cancel_order(self, order, symbol=None, version=None, **kwargs):
         # symbol needed when order is order_id
         if isinstance(order, Order) and order.is_closed:
             self.logger.info(
-                "Order %s is already closed and cannot be canceled.", order)
+                "Order %s is already closed and cannot be canceled.", order
+            )
             return order
 
         endpoint = Endpoint.ORDER_CANCEL
         params = {
             # ParamName.ORDER_ID: order.item_id if isinstance(order, Order) else order,
-            ParamName.ORDER_ID:
-            order,
-            ParamName.SYMBOL:
-            symbol,
+            ParamName.ORDER_ID: order,
+            ParamName.SYMBOL: symbol,
             # move to converter(?):  or (order.symbol if hasattr(order, ParamName.SYMBOL) else None),
         }
 
@@ -2571,23 +2900,17 @@ class PrivatePlatformRESTClient(PlatformRESTClient):
     def cancel_all_orders(self, symbol=None, version=None, **kwargs):
         if Endpoint.ORDERS_ALL_CANCEL in self.converter.endpoint_lookup:
             endpoint = Endpoint.ORDERS_ALL_CANCEL
-            params = {
-                ParamName.SYMBOL: symbol,
-            }
+            params = {ParamName.SYMBOL: symbol}
 
             result = self._send("DELETE", endpoint, params, version, **kwargs)
         else:
-            orders = self.fetch_orders(symbol,
-                                       version,
-                                       is_open_only=True,
-                                       **kwargs)
+            orders = self.fetch_orders(symbol, version, is_open_only=True, **kwargs)
             if isinstance(orders, Error):
                 return orders
             result = []
             if orders:
                 for order in orders:
-                    result.append(
-                        self.cancel_order(order, symbol, version, **kwargs))
+                    result.append(self.cancel_order(order, symbol, version, **kwargs))
         return result
 
     # ? todo test
@@ -2597,8 +2920,9 @@ class PrivatePlatformRESTClient(PlatformRESTClient):
     #         self.cancel_order(order, symbol, version, **kwargs)
 
     # was check_order
-    def fetch_order(self, order_or_id, symbol=None, version=None,
-                    **kwargs):  # , direction=None
+    def fetch_order(
+        self, order_or_id, symbol=None, version=None, **kwargs
+    ):  # , direction=None
         # item_id should be enough, but some platforms also need symbol and direction
         endpoint = Endpoint.ORDER
         if isinstance(order_or_id, Order):
@@ -2612,13 +2936,15 @@ class PrivatePlatformRESTClient(PlatformRESTClient):
         result = self._send("GET", endpoint, params, version, **kwargs)
         return result
 
-    def fetch_orders(self,
-                     symbol=None,
-                     limit=None,
-                     from_item=None,
-                     is_open_only=False,
-                     version=None,
-                     **kwargs):
+    def fetch_orders(
+        self,
+        symbol=None,
+        limit=None,
+        from_item=None,
+        is_open_only=False,
+        version=None,
+        **kwargs,
+    ):
         if is_open_only:
             endpoint = Endpoint.ORDERS_OPEN
             kwargs[ParamName.IS_OPEN] = is_open_only
@@ -2644,40 +2970,38 @@ class PrivatePlatformRESTClient(PlatformRESTClient):
     # symbol and then sell some other amount, then these amounts subtracted, while in some other
     # stock exchanges there will be created to different positions: buying and selling.
 
-    def get_positions(self,
-                      symbol: str = None,
-                      limit=None,
-                      is_open_only: bool = False,
-                      version=None,
-                      **kwargs):
+    def get_positions(
+        self,
+        symbol: str = None,
+        limit=None,
+        is_open_only: bool = False,
+        version=None,
+        **kwargs,
+    ):
         result = []
         if self.is_position_supported:
             endpoint = Endpoint.POSITION
-            params = {
-                ParamName.SYMBOL: symbol,
-                ParamName.LIMIT: limit,
-            }
+            params = {ParamName.SYMBOL: symbol, ParamName.LIMIT: limit}
 
             result = self._send("GET", endpoint, params, version, **kwargs)
         elif self.use_balance_as_position:
             if not self.pivot_symbol:
-                return Error(code=ErrorCode.WRONG_PARAM,
-                             message="pivot symbol missing")
+                return Error(code=ErrorCode.WRONG_PARAM, message="pivot symbol missing")
             # subsequent to do unclear
             # todo use Endpoint.POSITION: "balance" instead
-            balances = self.fetch_balance(version=version,
-                                                         **kwargs)
+            balances = self.fetch_balance(version=version, **kwargs)
             if not isinstance(balances, list):
                 return
 
             # mot generator because of complex hardly-readable condition and limit parameter
             for balance in balances:
-                position = self.helper.create_position_if_exist(balance, self.pivot_symbol, symbol)
+                position = self.helper.create_position_if_exist(
+                    balance, self.pivot_symbol, symbol
+                )
                 if position:
                     result.append(position)
                     if limit and len(result) >= limit:
                         break
-
 
         if result and is_open_only:
             result = [p for p in result if p.is_open]
@@ -2689,23 +3013,17 @@ class PrivatePlatformRESTClient(PlatformRESTClient):
             result = self._close_position(position, version, **kwargs)
         elif self.use_balance_as_position:
             if not (position and self.pivot_symbol):
-                return Error(code=ErrorCode.WRONG_PARAM,
-                             message="missing params")
-            assert (position.amount)
+                return Error(code=ErrorCode.WRONG_PARAM, message="missing params")
+            assert position.amount
             amount = position.amount
-            # referencing_pair: CurrencyPair = self.helper.get_currency_pair(self.platform_id, position.symbol)
-            # if referencing_pair.base == self.pivot_symbol:
-                # amount = self.helper.convert_amount_to_pivot(self.platform_id,
-                #                                              position.amount,
-                #                                              referencing_pair.base,
-                #                                              referencing_pair.quote)
             result = self.create_order(
                 position.symbol if position else position,
                 OrderType.MARKET,
                 Direction.inverse(position.direction) if position else None,
                 amount,
                 price=0,
-                version=version)
+                version=version,
+            )
             if isinstance(result, Error):
                 return result
             else:
@@ -2713,17 +3031,16 @@ class PrivatePlatformRESTClient(PlatformRESTClient):
                 return position
         else:
             result = None
-            self.logger.warning(
-                "Positions are not supported by this platform. ")
+            self.logger.warning("Positions are not supported by this platform. ")
 
         return result
 
     def _close_position(self, position_or_symbol, version=None, **kwargs):
         endpoint = Endpoint.POSITION_CLOSE
         params = {
-            ParamName.SYMBOL:
-            position_or_symbol.symbol if hasattr(
-                position_or_symbol, ParamName.SYMBOL) else position_or_symbol,
+            ParamName.SYMBOL: position_or_symbol.symbol
+            if hasattr(position_or_symbol, ParamName.SYMBOL)
+            else position_or_symbol
         }
 
         result = self._send("POST", endpoint, params, version, **kwargs)
@@ -2737,30 +3054,27 @@ class PrivatePlatformRESTClient(PlatformRESTClient):
                 result = [result]
         elif self.use_balance_as_position:
             if not self.pivot_symbol:
-                return Error(code=ErrorCode.WRONG_PARAM,
-                             message="pivot symbol missing")
-            positions = self.get_positions(symbol=symbol,
-                                           limit=None,
-                                           version=version,
-                                           **kwargs)
+                return Error(code=ErrorCode.WRONG_PARAM, message="pivot symbol missing")
+            positions = self.get_positions(
+                symbol=symbol, limit=None, version=version, **kwargs
+            )
             if not positions or not len(positions):
-                return Error(code=ErrorCode.WRONG_SYMBOL,
-                             message="No position having the criteria")
+                return Error(
+                    code=ErrorCode.WRONG_SYMBOL,
+                    message="No position having the criteria",
+                )
             result = [
                 self.close_position(position, version=version, **kwargs)
                 for position in positions
             ]
         else:
-            self.logger.warning(
-                "Positions are not supported by this platform. ")
+            self.logger.warning("Positions are not supported by this platform. ")
             result = []
         return result
 
     def _close_all_positions(self, symbol=None, version=None, **kwargs):
         endpoint = Endpoint.POSITION_CLOSE
-        params = {
-            ParamName.SYMBOL: symbol,
-        }
+        params = {ParamName.SYMBOL: symbol}
 
         result = self._send("POST", endpoint, params, version, **kwargs)
         return result
@@ -2798,6 +3112,7 @@ class WSConverter(ProtocolConverter):
     ]
     # generic_endpoints = None  # = supported_endpoints.difference(symbol_endpoints)
     supported_symbols = None
+    symbols_not_supported_endpoints = []
 
     # Converting info:
     # For converting to platform
@@ -2813,7 +3128,8 @@ class WSConverter(ProtocolConverter):
             # "error": Error,
             # "info": Info,
             # "subscribed": Channel,
-        })
+        },
+    )
     endpoint_symbol_params_by_subscription = None
 
     # todo convert back only those symbols (and for those endpoints) in items to be returned which were converted
@@ -2831,14 +3147,16 @@ class WSConverter(ProtocolConverter):
     @property
     def generic_endpoints(self):
         # Non-symbol endpoints
-        return set(self.supported_endpoints).difference(self.symbol_endpoints or set()) \
-            if self.supported_endpoints else set()
+        return (
+            set(self.supported_endpoints).difference(self.symbol_endpoints or set())
+            if self.supported_endpoints
+            else set()
+        )
 
     def generate_subscriptions(self, endpoints, symbols, **params):
         result = set()
         for endpoint in endpoints:
-            params_list = self._break_params_to_params_list(endpoint,
-                                                            params) or [{}]
+            params_list = self._break_params_to_params_list(endpoint, params) or [{}]
             for params_item in params_list:
                 if endpoint in self.symbol_endpoints:
                     if symbols:
@@ -2846,18 +3164,17 @@ class WSConverter(ProtocolConverter):
                             # (There is an exception when setting symbol in method params and in **params)
                             subscription_params = {
                                 ParamName.SYMBOL: symbol,
-                                **params_item
+                                **params_item,
                             }
                             result.add(
                                 self._generate_subscription(
-                                    endpoint, **subscription_params))
+                                    endpoint, **subscription_params
+                                )
+                            )
                     else:
-                        result.add(
-                            self._generate_subscription(
-                                endpoint, **params_item))
+                        result.add(self._generate_subscription(endpoint, **params_item))
                 else:
-                    result.add(
-                        self._generate_subscription(endpoint, **params_item))
+                    result.add(self._generate_subscription(endpoint, **params_item))
         return result
 
     def _break_params_to_params_list(self, endpoint, params):
@@ -2867,18 +3184,19 @@ class WSConverter(ProtocolConverter):
         result = None
         for name, value in params.items():
             # Don't break platform_id-s for ORDER_BOOK_AGG (for MDS, as aggregated order book is available only there)
-            is_break_values_allowed = endpoint != Endpoint.ORDER_BOOK_AGG or name != ParamName.PLATFORM_ID
+            is_break_values_allowed = (
+                endpoint != Endpoint.ORDER_BOOK_AGG or name != ParamName.PLATFORM_ID
+            )
 
             result = self._introduce_values_to_params_list(
-                result, name, value, is_break_values_allowed)
+                result, name, value, is_break_values_allowed
+            )
 
         return result
 
-    def _introduce_values_to_params_list(self,
-                                         params_list,
-                                         name,
-                                         values,
-                                         is_break_values_allowed=True):
+    def _introduce_values_to_params_list(
+        self, params_list, name, values, is_break_values_allowed=True
+    ):
         # Skip
         if not name or not values:
             return params_list
@@ -2886,9 +3204,11 @@ class WSConverter(ProtocolConverter):
         if not params_list:
             params_list = [{}]
         # Values to iterable
-        values = values if isinstance(
-            values,
-            (list, tuple, set)) and is_break_values_allowed else [values]
+        values = (
+            values
+            if isinstance(values, (list, tuple, set)) and is_break_values_allowed
+            else [values]
+        )
         is_one_value = len(values) == 1
 
         result = []
@@ -2902,19 +3222,21 @@ class WSConverter(ProtocolConverter):
         return result
 
     def _store_subscription(self, endpoints, symbols=None, **params):
-        params = {
-            k: v if isinstance(v, list) else [v]
-            for k, v in params.items()
-        }
+        params = {k: v if isinstance(v, list) else [v] for k, v in params.items()}
         symbols = symbols or [""]
         i_v = itertools.product(*list(params.values()))
         i_k = params.keys()
         for endpoint, symbol, param in itertools.product(
-                endpoints, symbols, map(lambda a: dict(zip(i_k, a)), i_v)):
-            for subscription in self.generate_subscriptions([endpoint],
-                                                            [symbol], **param):
+            endpoints, symbols, map(lambda a: dict(zip(i_k, a)), i_v)
+        ):
+            for subscription in self.generate_subscriptions(
+                [endpoint], [symbol], **param
+            ):
                 self.endpoint_symbol_params_by_subscription[subscription] = (
-                    endpoint, symbol, params)
+                    endpoint,
+                    symbol,
+                    params,
+                )
 
     def _generate_subscription(self, endpoint, symbol=None, **params):
         # Channel name - subscription
@@ -2944,33 +3266,43 @@ class WSConverter(ProtocolConverter):
 
     def get_subscription_info(self, endpoint, data):
         if isinstance(data, list):
-            subscription = data[0].get(
-                self.subscription_param) if self.subscription_param else None
+            subscription = (
+                data[0].get(self.subscription_param)
+                if self.subscription_param
+                else None
+            )
         else:
-            subscription = data.get(
-                self.subscription_param) if self.subscription_param else None
+            subscription = (
+                data.get(self.subscription_param) if self.subscription_param else None
+            )
         # Get endpoint and other data by subscription name
         symbol, params = None, None
         if self.endpoint_symbol_params_by_subscription:
             prev_endpoint = endpoint
             if subscription:
                 endpoint, symbol, params = self.endpoint_symbol_params_by_subscription.get(
-                    subscription, (endpoint, None, None))
+                    subscription, (endpoint, None, None)
+                )
             if prev_endpoint and endpoint != prev_endpoint:
                 self.logger.warning(
                     "Endpoint: %s changed to: %s for subscription: %s",
-                    prev_endpoint, endpoint, subscription)
+                    prev_endpoint,
+                    endpoint,
+                    subscription,
+                )
         return subscription, endpoint, symbol, params
 
     def parse(self, endpoint, data):
         # (Get endpoint from event type)
         event_type = None
-        if not endpoint and data and isinstance(
-                data, dict) and self.event_type_param:
+        if not endpoint and data and isinstance(data, dict) and self.event_type_param:
             event_type = endpoint = data.get(self.event_type_param, endpoint)
 
-        endpoint = self.endpoint_by_event_type.get(endpoint, endpoint) \
-            if self.endpoint_by_event_type else endpoint
+        endpoint = (
+            self.endpoint_by_event_type.get(endpoint, endpoint)
+            if self.endpoint_by_event_type
+            else endpoint
+        )
         # if not endpoint:
         #     self.logger.error("Cannot find event type by name: %s in data: %s", self.event_type_param, data)
         # self.logger.debug("Endpoint: %s by name: %s in data: %s", endpoint, self.event_type_param, data)
@@ -3001,6 +3333,7 @@ class WSClient(BaseClient):
         # Resulting subscriptions: [Endpoint.TRADE] channel for symbols:
         # ["ETHUSD", "ETHBTC", "ETHBTC", "ETHUSD"]
     """
+
     # Settings:
     _log_prefix = "WSClient"
 
@@ -3052,7 +3385,6 @@ class WSClient(BaseClient):
     _data_buffer = None
     _prev_ping_timestamp = None
     _is_ping = False
-    lock = RLock()
 
     subscription_limit_by_endpoint = {}
 
@@ -3072,12 +3404,9 @@ class WSClient(BaseClient):
         return self.ws.sock.connected if self.ws and self.ws.sock else False
         # return self.is_started and not self._is_reconnecting
 
-    def __init__(self,
-                 api_key=None,
-                 api_secret=None,
-                 version=None,
-                 credentials=None,
-                 **kwargs) -> None:
+    def __init__(
+        self, api_key=None, api_secret=None, version=None, credentials=None, **kwargs
+    ) -> None:
         super().__init__(version, **kwargs)
         self.symbols_by_endpoint = defaultdict(set)
         self.set_credentials(api_key, api_secret, credentials=credentials)
@@ -3089,30 +3418,31 @@ class WSClient(BaseClient):
         self.throttle_counter = [datetime.now().minute, 0]
 
         # (For convenience)
-        self.IS_SUBSCRIPTION_COMMAND_SUPPORTED = self.converter.IS_SUBSCRIPTION_COMMAND_SUPPORTED
+        self.IS_SUBSCRIPTION_COMMAND_SUPPORTED = (
+            self.converter.IS_SUBSCRIPTION_COMMAND_SUPPORTED
+        )
+        self._connect_trigger = Trigger()
+        self._reconnect_trigger = Trigger()
+        self._reconnect_thread = None
+        self._reconnect_thread_lock = threading.Lock()
+        self._connect_thread = None
+        self._connect_thread_lock = threading.Lock()
+        self._stop_conn_threads_ev = threading.Event()
 
     # Subscription
 
-    def get_adding_subscriptions_for(self,
-                                     endpoints=None,
-                                     symbols=None,
-                                     **params):
+    def get_adding_subscriptions_for(self, endpoints=None, symbols=None, **params):
         # if not endpoints:
         #     # endpoints = self.endpoints or self.converter.supported_endpoints
         #     endpoints = self.symbols_by_endpoint or self.converter.supported_endpoints
         if not endpoints and not symbols:
-            return self.symbols_by_endpoint, None, self.current_subscriptions.copy(
-            )
+            return self.symbols_by_endpoint, None, self.current_subscriptions.copy()
 
         return self._get_subscriptions_for(endpoints, symbols, **params)
 
-    def get_removing_subscriptions_for(self,
-                                       endpoints=None,
-                                       symbols=None,
-                                       **params):
+    def get_removing_subscriptions_for(self, endpoints=None, symbols=None, **params):
         if not endpoints and not symbols:
-            return self.symbols_by_endpoint, None, self.current_subscriptions.copy(
-            )
+            return self.symbols_by_endpoint, None, self.current_subscriptions.copy()
 
         return self._get_subscriptions_for(endpoints, symbols, **params)
 
@@ -3133,15 +3463,15 @@ class WSClient(BaseClient):
             for endpoint, symbols in symbols_by_endpoints:
                 if endpoint:
                     _endpoints, _symbols, _subscriptions = self._get_subscriptions_for(
-                        endpoint, symbols, **params)
+                        endpoint, symbols, **params
+                    )
                     endpoints.update(_endpoints)
                     symbols.update(_symbols)
                     subscriptions.update(_subscriptions)
             return endpoints, symbols, subscriptions
 
         endpoints = Endpoint.convert_to_endpoints(endpoints)
-        endpoints = set(endpoints).intersection(
-            self.converter.supported_endpoints)
+        endpoints = set(endpoints).intersection(self.converter.supported_endpoints)
 
         if not endpoints:
             return None, None, None
@@ -3155,7 +3485,8 @@ class WSClient(BaseClient):
         symbols = Currency.convert_to_symbols(symbols)
 
         subscriptions = self.converter.generate_subscriptions(
-            endpoints, symbols, **params)
+            endpoints, symbols, **params
+        )
         return endpoints, symbols, subscriptions
 
     def subscribe(self, endpoints=None, symbols=None, **params):
@@ -3183,10 +3514,14 @@ class WSClient(BaseClient):
         """
         symbols = self.convert_symbols_to_platform_format(symbols)
         self.logger.debug(
-            "Subscribe on endpoints: %s and symbols: %s prev: %s", endpoints,
-            symbols, self.symbols_by_endpoint)
+            "Subscribe on endpoints: %s and symbols: %s prev: %s",
+            endpoints,
+            symbols,
+            self.symbols_by_endpoint,
+        )
         endpoints, symbols, subscriptions = self.get_adding_subscriptions_for(
-            endpoints, symbols, **params)
+            endpoints, symbols, **params
+        )
         self.converter._store_subscription(endpoints, symbols, **params)
 
         # Get subscriptions
@@ -3223,14 +3558,19 @@ class WSClient(BaseClient):
         if endpoints and not symbols or not endpoints and symbols:
             self.logger.error(
                 "Wrong parameters given for unsubscribe! Remove all given "
-                "arguments or specify both endpoint s and symbols")
+                "arguments or specify both endpoint s and symbols"
+            )
 
         self.logger.debug(
             "Unsubscribe from endpoints: %s for symbols: %s and params: %s",
-            endpoints, symbols, params)
+            endpoints,
+            symbols,
+            params,
+        )
         # Get subscriptions
         endpoints, symbols, subscriptions = self.get_removing_subscriptions_for(
-            endpoints, symbols, **params)
+            endpoints, symbols, **params
+        )
 
         # Apply changes
         # endpoints = set(endpoints) if endpoints else set()
@@ -3241,12 +3581,14 @@ class WSClient(BaseClient):
         _symbols = {}
         for endpoint in endpoints:
             if symbols:
-                self.symbols_by_endpoint[endpoint].difference_update(
-                    set(symbols))
+                self.symbols_by_endpoint[endpoint].difference_update(set(symbols))
 
         # Unsubscribe
-        subscribed = self.pending_subscriptions.union(self.successful_subscriptions or set()) \
-            if self.pending_subscriptions else set()
+        subscribed = (
+            self.pending_subscriptions.union(self.successful_subscriptions or set())
+            if self.pending_subscriptions
+            else set()
+        )
         if not subscribed:
             subscribed = set(self.current_subscriptions)
 
@@ -3292,7 +3634,6 @@ class WSClient(BaseClient):
                 to_subscribe = subscriptions.difference(self.pending_subscriptions)
                 self.pending_subscriptions.update(subscriptions)
                 self._send_subscribe(to_subscribe)
-        time.sleep(0)
 
     def _unsubscribe(self, subscriptions):
         # Call unsubscribe command with "subscriptions" param or reconnect with
@@ -3326,56 +3667,78 @@ class WSClient(BaseClient):
             return
 
         if not self.url:
-            self.logger.warning("Cannot start WebSocket with empty url: %s" %
-                                self.url)
+            self.logger.warning("Cannot start WebSocket with empty url: %s" % self.url)
             return
 
         # Connect
         self.is_started = True
-        # while self.is_started:
-        if not self.ws:
-            self.ws = WebSocketApp(self.url,
-                                   header=self.headers,
-                                   on_open=self._on_open,
-                                   on_message=self._on_message,
-                                   on_error=self._on_error,
-                                   on_close=self._on_close)
-        else:
-            self.ws.url = self.url
-            self.ws.header = self.headers
+        self._connect_trigger.call()
+        self._stop_conn_threads_ev.clear()
+        with self._connect_thread_lock:
+            if self._connect_thread is None or not self._connect_thread.is_alive():
+                self._connect_thread = Thread(target=self._connect, daemon=True)
+                self._connect_thread.start()
 
-        # (run_forever() will raise an exception if previous socket is still not closed)
-        self.logger.info("Start WebSocket with url: %s" % self.ws.url)
-        kwargs = {"ping_interval": 20}
-        kwargs_proxy = {}
-        if hasattr(self, "get_next_proxy"):
-            self.proxy = self.get_next_proxy(self.__class__.__name__)
-            assert self.proxy is not None
-            """
-                https://github.com/websocket-client/websocket-client/blob/master/websocket/_core.py#L207
-                 "http_proxy_host" - http proxy host name.
-                 "http_proxy_port" - http proxy port. If not set, set to 80.
-                 "http_proxy_auth" - http proxy auth information.
-                                     tuple of username and password.
-                                     default is None
-            """
-            kwargs_proxy = {
-                "http_proxy_host": self.proxy.address,
-                "http_proxy_port": self.proxy.port,
-                "http_proxy_auth": (self.proxy.username, self.proxy.password)
-            }
-        self.thread = Thread(target=self.ws.run_forever,
-                             kwargs={
-                                 **kwargs,
-                                 **kwargs_proxy
-                             },
-                             daemon=True)
-        self.thread.start()
-        # if not self.ping_thread:
-        #     self.ping_thread = Thread(target=self._process_ping, daemon=True)
-        #     self.ping_thread.start()
-        # self.thread.join()
-        # self.ws = None
+    def _connect(self):
+        while True:
+            if self.thread and self.thread.is_alive():
+                self.thread.join()
+
+            self._connect_trigger.wait()
+            # Wait for sequential connects, e.g. when Binance client call subscribe multiple times
+            # which results in multiple reconnects
+            while self._connect_trigger.wait(timeout=1):
+                self.logger.debug('Waiting an additional second because got new connect request')
+                pass
+
+            if self._stop_conn_threads_ev.is_set():
+                break
+
+            if not self.is_started:
+                return
+
+            if not self.ws:
+                self.ws = WebSocketApp(
+                    self.url,
+                    header=self.headers,
+                    on_open=self._on_open,
+                    on_message=self._on_message,
+                    on_error=self._on_error,
+                    on_close=self._on_close,
+                )
+            else:
+                self.ws.url = self.url
+                self.ws.header = self.headers
+
+            # (run_forever() will raise an exception if previous socket is still not closed)
+            self.logger.info("Start WebSocket (%s) with url: %s", self.ws, self.ws.url)
+            kwargs = {"ping_interval": 20}
+            kwargs_proxy = {}
+            if hasattr(self, "get_next_proxy"):
+                self.proxy = self.get_next_proxy(self.__class__.__name__)
+                assert self.proxy is not None
+                """
+                    https://github.com/websocket-client/websocket-client/blob/master/websocket/_core.py#L207
+                     "http_proxy_host" - http proxy host name.
+                     "http_proxy_port" - http proxy port. If not set, set to 80.
+                     "http_proxy_auth" - http proxy auth information.
+                                         tuple of username and password.
+                                         default is None
+                """
+                kwargs_proxy = {
+                    "http_proxy_host": self.proxy.address,
+                    "http_proxy_port": self.proxy.port,
+                    "http_proxy_auth": (self.proxy.username, self.proxy.password),
+                }
+            self.thread = Thread(
+                target=self._run_forever, kwargs={**kwargs, **kwargs_proxy}, daemon=True
+            )
+            self.thread.start()
+            # if not self.ping_thread:
+            #     self.ping_thread = Thread(target=self._process_ping, daemon=True)
+            #     self.ping_thread.start()
+            # self.thread.join()
+            # self.ws = None
 
     def throttle(self):
         minute = datetime.now().minute
@@ -3385,31 +3748,58 @@ class WSClient(BaseClient):
             self.throttle_counter[0] = minute
             self.throttle_counter[1] = 0
         if self.throttle_counter[1]:
-            attempts = min(self.throttle_counter[1],
-                           self.THROTTLE_MAX_DELAY - 1)
+            attempts = min(self.throttle_counter[1], self.THROTTLE_MAX_DELAY - 1)
             delay = math.log10(attempts)
-            # delay = self.THROTTLE_MAX_DELAY / (self.THROTTLE_MAX_DELAY -
-            #                                    attempts)
-            self.logger.debug("ws throttle: sleeping for %s seconds", delay)
-            time.sleep(delay)
+            if delay > 0:
+                self.logger.debug("ws throttle: sleeping for %s seconds", delay)
+                time.sleep(delay)
+
+    def unsuccessful_reconnect_throttle(self):
+        self.reconnect_delay_sec = 2 ** (min(self._reconnect_tries, 12)) / 10
+        if self._reconnect_tries != 0 and self.reconnect_delay_sec > 0:
+            # Don't wait before the first reconnection try
+            self.logger.info("Wait %s seconds before reconnect.", self.reconnect_delay_sec)
+            time.sleep(self.reconnect_delay_sec)
+        self._reconnect_tries += 1
 
     def reconnect(self):
-        self.ws and self.logger.info("Reconnecting WebSocket: %s",
-                                     self.ws.sock)
-        self.close()
-        self.throttle()
-        # time.sleep(1)
-        self.connect()
+        self._reconnect_trigger.call()
 
-    def close(self):
+        with self._reconnect_thread_lock:
+            if self._reconnect_thread is None or not self._reconnect_thread.is_alive():
+                self._reconnect_thread = Thread(target=self._reconnect, daemon=True)
+                self._reconnect_thread.start()
+
+    def _reconnect(self):
+        while True:
+            self._reconnect_trigger.wait()
+
+            if self._stop_conn_threads_ev.is_set():
+                break
+
+            self.ws and self.logger.info("Reconnecting WebSocket: %s", self.ws.sock)
+            self.close(stop_connect_threads=False)
+            self.throttle()
+            self.unsuccessful_reconnect_throttle()
+            self.connect()
+
+    def close(self, stop_connect_threads=True):
+        if stop_connect_threads:
+            self._stop_conn_threads_ev.set()
+            self._reconnect_trigger.call()
+            self._connect_trigger.call()
+
         if not self.is_started:
             # Nothing to close
             return
         # print("\n\n")
         self.logger.info(
-            "Close WebSocket. is_connected: %s is_connecting: %s thread: %s %s",
-            self.is_connected, self.is_connecting, self.platform_id,
-            threading.current_thread())
+            "Close WebSocket (%s). is_connected: %s is_connecting: %s thread: %s",
+            self.ws,
+            self.is_connected,
+            self.is_connecting,
+            threading.current_thread(),
+        )
         # self.is_started = False  # - makes self.is_connecting==False
         # (If called directly or from _on_close())
         if self.ws:  # or self.is_connecting:
@@ -3421,7 +3811,10 @@ class WSClient(BaseClient):
         self.is_started = False
         # self.logger.debug("Closed WebSocket is_connected: %s is_connecting: %s keep_running: %s",
         #                   self.is_connected, self.is_connecting, self.ws.keep_running)
-        del self.ws
+        try:
+            del self.ws
+        except AttributeError:
+            pass
         self.ws = None
 
         super().close()
@@ -3429,11 +3822,14 @@ class WSClient(BaseClient):
     def _on_open(self):
         self.logger.info(
             "On open. %s is_started:%s connected:%s keep-running:%s thread: %s %s %s",
-            "Connected."
-            if self.is_connected else "NOT CONNECTED. It's impossible!",
-            self.is_started, self.ws.sock.connected if self.ws else None,
-            self.ws.keep_running if self.ws else None, self.platform_id,
-            threading.current_thread(), self)
+            "Connected." if self.is_connected else "NOT CONNECTED. It's impossible!",
+            self.is_started,
+            self.ws.sock.connected if self.ws else None,
+            self.ws.keep_running if self.ws else None,
+            self.platform_id,
+            threading.current_thread(),
+            self,
+        )
         if not self.is_started:
             self.close()
             return
@@ -3443,8 +3839,9 @@ class WSClient(BaseClient):
         self._reconnect_tries = 0
 
         if self.connecting_message_queue:
-            self.logger.info("Send all %s messages from queue.",
-                             len(self.connecting_message_queue))
+            self.logger.info(
+                "Send all %s messages from queue.", len(self.connecting_message_queue)
+            )
             while self.connecting_message_queue:
                 self._send(self.connecting_message_queue.pop(0))
 
@@ -3456,15 +3853,17 @@ class WSClient(BaseClient):
             self.subscribe()
 
     def _preprocess_message(self, message):
-        self.logger.debug("On message: %s thread: %s %s",
-                          make_short_str(message, 200), self.platform_id,
-                          threading.current_thread())
+        self.logger.debug(
+            "On message: %s thread: %s %s",
+            make_short_str(message, 200),
+            self.platform_id,
+            threading.current_thread(),
+        )
         # str -> json
         try:
             return json.loads(message, parse_float=Decimal)
         except json.JSONDecodeError:
-            self.logger.error("Wrong JSON is received! Skipped. message: %s",
-                              message)
+            self.logger.error("Wrong JSON is received! Skipped. message: %s", message)
 
     def _on_message(self, message):
         data = self._preprocess_message(message)
@@ -3493,8 +3892,10 @@ class WSClient(BaseClient):
             #     self.on_item_received(result)
 
         if self.on_data and self._data_buffer:
-            self.logger.debug("Send data out of client - on_data: %s ",
-                              items_to_interval_string(self._data_buffer))
+            self.logger.debug(
+                "Send data out of client - on_data: %s ",
+                items_to_interval_string(self._data_buffer),
+            )
             sig = signature(self.on_data)
             if len(sig.parameters) == 1:
                 # on_data(items)
@@ -3511,20 +3912,22 @@ class WSClient(BaseClient):
         # -self.logger.debug("###parse endpoint: %s data: %s data_by_subscr: %s",
         #                   endpoint, data, self.converter.endpoint_symbol_params_by_subscription)
         subscription, endpoint, symbol, params = self.converter.get_subscription_info(
-            endpoint, data)
+            endpoint, data
+        )
         # -self.logger.debug("   ###parse subscription: %s endpoint: %s symbol: %s params: %s",
         #                   subscription, endpoint, symbol, params)
-        data = self.converter.preprocess_data(data, subscription, endpoint,
-                                              symbol, params)
+        data = self.converter.preprocess_data(
+            data, subscription, endpoint, symbol, params
+        )
         # Parse
         result = self.converter.parse(endpoint, data)
         # (Set some params by subscribing params)
-        result = self.converter.post_process_result(result, None, endpoint,
-                                                    params)
+        result = self.converter.post_process_result(result, None, endpoint, params)
         # (Set subscription param)
 
         self.converter.propagate_param_to_result(
-            "subscription", {"subscription": subscription}, result)
+            "subscription", {"subscription": subscription}, result
+        )
         return result
 
     def on_item_received(self, item):
@@ -3555,14 +3958,18 @@ class WSClient(BaseClient):
         self.logger.info(
             "On error. Note: Ignore errors if websocket was closed while trying to connect. "
             "The problem is in websockets library. thread: %s %s",
-            self.platform_id, threading.current_thread())
-        self.logger.exception("On error exception from websockets: %s",
-                              error_exc)
+            self.platform_id,
+            threading.current_thread(),
+        )
+        self.logger.exception("On error exception from websockets: %s", error_exc)
 
     def _on_close(self):
         self.logger.info(
             "On WebSocket close (disconnect) is_started: %s thread: %s %s",
-            self.is_started, self.platform_id, threading.current_thread())
+            self.is_started,
+            self.platform_id,
+            threading.current_thread(),
+        )
 
         if self.on_disconnect:
             self.on_disconnect()
@@ -3570,40 +3977,13 @@ class WSClient(BaseClient):
         if self.IS_SUBSCRIPTION_COMMAND_SUPPORTED and not self.is_subscribed_with_url:
             self.pending_subscriptions.clear()
 
-        # Note: is_started is always True, so now reconnect_count doesn't make effect
-        if self.is_started or (self._is_reconnecting and
-                                self._reconnect_tries < self.reconnect_count):
-            # NOTE: reconnecting on close doesn't work due to bugs in websocket library
-            # ("self.sock = None" after "self._callback(self.on_close, *close_args)" where on_close runs reconnect()
-            # which fails because sock is not empty and sock.connected is still True
-            # when is disconnected and should be False)
-            # (Try to fix that by setting sock=None by ourselves)
-            self._finalize_connection()  # that should fix
-
+        if self.is_started or self._is_reconnecting:
             self._is_reconnecting = True
-            self.logger.info(
-                "Reconnecting... is_started: %s delay_s: %s. tries: %s of %s",
-                self.is_started, self.reconnect_delay_sec,
-                self._reconnect_tries + 1, self.reconnect_count)
-            if self._reconnect_tries != 0 and self.reconnect_delay_sec > 0:
-                self.reconnect_delay_sec = 2**(min(self._reconnect_tries, 8))
-                # Don't wait before the first reconnection try
-                self.logger.info("Wait %s seconds before reconnect.",
-                                 self.reconnect_delay_sec)
-                time.sleep(self.reconnect_delay_sec)
-            self._reconnect_tries += 1
-            self.reconnect()
+            self.logger.info("Reconnecting... is_started: %s, tries: %s", self.is_started, self._reconnect_tries)
             return
+
         self._is_reconnecting = False
-        # self.logger.warning(
-        #     "No more reconnect tries available - close client. tries: %s of %s",
-        #     self._reconnect_tries + 1, self.reconnect_count)
-
         self.close()
-
-    def _finalize_connection(self):
-        if self.ws and getattr(self.ws, 'sock', None):
-            self.ws.sock = None
 
     def _send(self, data):
         if not data:
@@ -3616,7 +3996,9 @@ class WSClient(BaseClient):
             self.connecting_message_queue.append(message)
             self.logger.debug(
                 "Add message: %s to queue (len: %s) while client is only connecting.",
-                message, len(self.connecting_message_queue))
+                message,
+                len(self.connecting_message_queue),
+            )
         elif self.is_connected:
             self.logger.debug("Send message: %s", message)
             self.ws.send(message)
@@ -3626,8 +4008,10 @@ class WSClient(BaseClient):
     # is_reconnect = False
     def _process_ping(self):
         while self.is_started and self._send_ping and self.ping_interval_sec:
-            if not self._prev_ping_timestamp or time.time(
-            ) - self._prev_ping_timestamp >= self.ping_interval_sec:
+            if (
+                not self._prev_ping_timestamp
+                or time.time() - self._prev_ping_timestamp >= self.ping_interval_sec
+            ):
                 # if self._is_ping:
                 #     self.logger.warning("Didn't receive pong after ping during %s seconds. Seems as disconnected. "
                 #                         "To be reconnected.")
@@ -3641,13 +4025,18 @@ class WSClient(BaseClient):
             time.sleep(self.ping_interval_sec)
 
     def get_endpoint_symbol_params_by_subscription(self, subscription):
-        return self.converter.endpoint_symbol_params_by_subscription.get(
-            subscription)
+        return self.converter.endpoint_symbol_params_by_subscription.get(subscription)
 
     def _send_ping(self):
         pass
 
-    # Processing
+    def _run_forever(self, **kwargs):
+        if not self.is_started:
+            return
+        if self.ws:
+            self.ws.run_forever(**kwargs)
+        if self._is_reconnecting:
+            self.reconnect()
 
 
 class SignalRConnection(Connection):
@@ -3664,9 +4053,9 @@ class SignalRConnection(Connection):
     def start(self):
         self.starting.fire()
 
-        transport = getattr(self, '_Connection__transport')
+        transport = getattr(self, "_Connection__transport")
         negotiate_data = transport.negotiate()
-        self.token = negotiate_data['ConnectionToken']
+        self.token = negotiate_data["ConnectionToken"]
 
         listener = transport.start()
 
@@ -3680,7 +4069,7 @@ class SignalRConnection(Connection):
 
         self.is_open = True
         listener_thread = Thread(target=wrapped_listener, daemon=True)
-        setattr(self, '_Connection__listener_thread', listener_thread)
+        setattr(self, "_Connection__listener_thread", listener_thread)
         listener_thread.start()
         self.started = True
         self.started_ev.fire()
@@ -3706,16 +4095,14 @@ class SignalRClient(WSClient):
         self.is_started = True
 
         if not self.connection:
-            self.connection = SignalRConnection(self.converter.base_url,
-                                                Session())
+            self.connection = SignalRConnection(self.converter.base_url, Session())
             self.hub = self.connection.register_hub(self.converter.hub_name)
 
             self.connection.error += self._on_error
             self.connection.started_ev += self._on_open
             self.connection.closed_ev += self._on_close
 
-        self.logger.info("Start SignalR with url: %s" %
-                         self.converter.base_url)
+        self.logger.info("Start SignalR with url: %s" % self.converter.base_url)
         self.connection.start()
 
     def close(self):
@@ -3747,19 +4134,19 @@ class SignalRClient(WSClient):
     def _on_event_subsription(self, method):
         event = self.converter.event_by_method_lookup.get(method)
         if event:
-            self.hub.client.on(event,
-                               lambda *args: self._on_received(event, *args))
+            self.hub.client.on(event, lambda *args: self._on_received(event, *args))
 
     def _on_received(self, event, *args, **kwargs):
         if len(args) > 0:
             for message in args:
-                super()._on_message(self.__get_deflated_message(
-                    message, event))
+                super()._on_message(self.__get_deflated_message(message, event))
 
     def __get_deflated_message(self, message, event_type):
         deflated_msg = decompress(b64decode(message), -MAX_WBITS)
-        deflated_msg = deflated_msg.decode('utf-8')
-        deflated_msg = deflated_msg[:len(deflated_msg) - 1] + \
-                       f",\"e\":\"{event_type}\"" + \
-                       deflated_msg[len(deflated_msg) - 1:]
+        deflated_msg = deflated_msg.decode("utf-8")
+        deflated_msg = (
+            deflated_msg[: len(deflated_msg) - 1]
+            + f',"e":"{event_type}"'
+            + deflated_msg[len(deflated_msg) - 1 :]
+        )
         return deflated_msg

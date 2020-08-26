@@ -19,14 +19,12 @@ class SingleDataAggregator:
     def __new__(cls, *args, **kwargs):
         if not SingleDataAggregator.__instance:
             SingleDataAggregator.__instance = super().__new__(cls, *args, **kwargs)
+            from hyperquant.api import CurrencyPair
+            from hyperquant.clients import Quote
+            cls.quotes_by_symbol_by_platform_id: Dict[int, Dict[str, Tuple[Quote, float]]] = defaultdict(dict)
+            cls.currency_pair_by_name_by_platform_id: Dict[int, Dict[str, CurrencyPair]] = defaultdict(dict)
+            cls.symbols_by_platform_id = {}
         return SingleDataAggregator.__instance
-
-    def __init__(self):
-        from hyperquant.api import CurrencyPair
-        from hyperquant.clients import Quote
-        self.quotes_by_symbol_by_platform_id: Dict[int, Dict[str, Tuple[Quote, float]]] = defaultdict(dict)
-        self.currency_pair_by_name_by_platform_id: Dict[int, Dict[str, CurrencyPair]]  = defaultdict(dict)
-        self.symbols_by_platform_id = {}
 
     def get_currency_pair(self, platform_id, symbol):
         currency_pair_by_name = self.get_currency_pairs_by_name(platform_id)
@@ -56,9 +54,10 @@ class SingleDataAggregator:
         from hyperquant.clients.utils import get_or_create_rest_client
         return get_or_create_rest_client(platform_id)
 
-    def get_quote(self, platform_id, symbol, data_age_sec=30):
+    def get_quote(self, platform_id, symbol, data_age_sec=10):
         current_time = time.time()
-        if symbol not in self.quotes_by_symbol_by_platform_id:
+        if (platform_id not in self.quotes_by_symbol_by_platform_id
+                or symbol not in self.quotes_by_symbol_by_platform_id[platform_id]):
             client = self.get_rest_client(platform_id)
             quote = client.fetch_quote(symbol)
             self.quotes_by_symbol_by_platform_id[platform_id][symbol] = (quote, current_time)
@@ -125,7 +124,6 @@ class SingleDataAggregator:
                                     if balance.symbol == referencing_pair.base else Direction.SELL)
                 position.endpoint = Endpoint.POSITION
                 return position
-
 
     def convert_amount_to_pivot(self,
                                 platform_id,

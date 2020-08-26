@@ -20,6 +20,7 @@ class BinanceSettingsMixInV1:
     testing_symbol, testing_symbol2 = testing_symbols
     testing_order_symbol, testing_order_symbol2 = testing_symbols
     is_support_fetch_orders_without_symbol = False
+    is_market_orders_possible_to_cancel = True
 
     # (All numbers taken from https://api.binance.com/api/v1/exchangeInfo for EOSETH.
     # LOT_SIZE error - amount is too small
@@ -157,10 +158,10 @@ class TestBinanceRESTClientHistoryV1(BinanceSettingsMixInV1,
 
     # fetch_trades_history
 
-    def test_fetch_trades_history(self):
+    def test_fetch_trades_history(self, is_auth=False):
         super().test_fetch_trades_history()
 
-    def test_fetch_trades_history_errors(self):
+    def test_fetch_trades_history_errors(self, is_auth=False):
         super().test_fetch_trades_history_errors()
 
         # Testing create_rest_client() which must set api_key for Binance
@@ -177,13 +178,13 @@ class TestBinanceRESTClientHistoryV1(BinanceSettingsMixInV1,
         self.assertIsInstance(result, Error)
         self.assertEqual(result.code, ErrorCode.UNAUTHORIZED)
 
-    def test_fetch_trades_history_limit(self):
-        super().test_fetch_trades_history_limit()
+    def test_fetch_trades_history_limit(self, is_auth=False):
+        super().test_fetch_trades_history_limit(is_auth)
 
-    def test_fetch_trades_history_limit_is_too_big(self):
+    def test_fetch_trades_history_limit_is_too_big(self, is_auth=False):
         super().test_fetch_trades_history_limit_is_too_big()
 
-    def test_fetch_trades_history_sorting(self):
+    def test_fetch_trades_history_sorting(self, is_auth=False):
         super().test_fetch_trades_history_sorting()
 
     def test_fetch_trades_is_same_as_first_history(self):

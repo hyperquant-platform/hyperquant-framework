@@ -11,7 +11,7 @@ from operator import itemgetter
 
 from hyperquant.api import (CandleInterval, Currency, CurrencyPair, Direction,
                             OrderBookDepthLevel, OrderStatus, OrderTimeInForce,
-                            OrderType, Platform, Sorting, TransactionType)
+                            OrderType, Platform, Sorting, TransactionType, TransactionStatus)
 from hyperquant.clients import (Account, Balance, BalanceTransaction, Candle,
                                 Endpoint, Error, ErrorCode, ItemObject,
                                 MyTrade, Order, OrderBook, OrderBookDiff,
@@ -32,6 +32,7 @@ class BitMEXRESTConverterV1(RESTConverter):
     Go https://www.bitmex.com/api/v1/schema for whole API schema with param types keys
     which help to distinguish items from each other (for updates and removing).
     """
+
     SATOSHI_TO_XBT = Decimal("0.00000001")
 
     # Main params:
@@ -66,7 +67,6 @@ class BitMEXRESTConverterV1(RESTConverter):
         "instrument/active",
         Endpoint.ORDER_BOOK:
         "orderBook/L2",
-
         # https://github.com/BitMEX/api-connectors/issues/141#issuecomment-392629551
         Endpoint.QUOTE:
         "orderBook/L2",  # Private
@@ -98,6 +98,7 @@ class BitMEXRESTConverterV1(RESTConverter):
     param_name_lookup = {
         ParamName.ORDER_ID: "orderID",  # !!! use userOrderID property!
         ParamName.SYMBOL: "symbol",
+        ParamName.LEVEL: "depth",
         ParamName.LIMIT: "count",
         ParamName.LIMIT_SKIP: "start",
         ParamName.SORTING: "reverse",
@@ -117,6 +118,7 @@ class BitMEXRESTConverterV1(RESTConverter):
         ParamName.PRICE_STOP: "stopPx",
         ParamName.PRICE_LIMIT: "price",
         ParamName.TIME_IN_FORCE: "timeInForce",
+        ParamName.OFFSET: "start",
         # ParamName.ASKS: "",
         # ParamName.BIDS: "",
     }
@@ -129,7 +131,7 @@ class BitMEXRESTConverterV1(RESTConverter):
         # ParamName.AMOUNT_AVAILABLE: "amount",
         ParamName.SORTING: {
             Sorting.ASCENDING: "false",
-            Sorting.DESCENDING: "true",
+            Sorting.DESCENDING: "true"
         },
         # (Should be out of ParamName.SORTING: {})
         Sorting.DEFAULT_SORTING:
@@ -140,12 +142,11 @@ class BitMEXRESTConverterV1(RESTConverter):
             CandleInterval.HRS_1: "1h",
             CandleInterval.DAY_1: "1d",
         },
-
         # By properties:
         # https://www.onixs.biz/fix-dictionary/5.0.SP2/tagNum_54.html
         ParamName.DIRECTION: {
             Direction.SELL: "Sell",
-            Direction.BUY: "Buy",
+            Direction.BUY: "Buy"
         },
         # https://www.onixs.biz/fix-dictionary/5.0.SP2/tagNum_40.html
         ParamName.ORDER_TYPE: {
@@ -179,12 +180,28 @@ class BitMEXRESTConverterV1(RESTConverter):
         #     OrderStatus.REJECTED: "Rejected",
         #     OrderStatus.EXPIRED: "Expired",
         # },
+        # https://github.com/ccxt/ccxt/blob/c7e6a0dc7c07fb97132d066fcdd14a3766808c3f/python/ccxt/bitmex.py#L427
         ParamName.TRANSACTION_TYPE: {
             TransactionType.DEPOSIT: "Deposit",
             TransactionType.WITHDRAWAL: "Withdrawal",
-            TransactionType.REALISED_PNL:
-            "RealisedPNL",  # temp - for BitMEX, may be changed later
+            TransactionType.REALISED_PNL: "RealisedPNL",
+            TransactionType.UNREALISED_PNL: "UnrealisedPNL",
+            TransactionType.TRANSFER: "Transfer",
+            TransactionType.AFFILIATE_PAYOUT: "AffiliatePayout",
         },
+        # https://github.com/ccxt/ccxt/blob/c7e6a0dc7c07fb97132d066fcdd14a3766808c3f/python/ccxt/bitmex.py#L589
+        ParamName.TRANSACTION_STATUS: {
+            TransactionStatus.COMPLETED: "Completed",
+            TransactionStatus.CANCELLED: "Canceled",
+            TransactionStatus.PENDING: "Pending",
+        },
+
+        ParamName.LEVEL: {
+            OrderBookDepthLevel.LIGHT: 25,
+            OrderBookDepthLevel.MEDIUM: 25,
+            OrderBookDepthLevel.DEEP: 25,
+            OrderBookDepthLevel.DEEPEST: 0,
+        }
     }
     param_value_reversed_lookup = {
         ParamName.ORDER_STATUS: {
@@ -200,10 +217,13 @@ class BitMEXRESTConverterV1(RESTConverter):
             "Stopped": OrderStatus.OPEN,  # ? "open",
             "Untriggered": OrderStatus.OPEN,  # ? "open",
             "Triggered": OrderStatus.OPEN,  # ? "open",
-        },
+        }
     }
     max_limit_by_endpoint = {
         Endpoint.TRADE: 500,
+        Endpoint.TRADE_MY: 500,
+        Endpoint.ORDER: 500,
+        Endpoint.ORDERS_ALL: 500,
         Endpoint.TRADE_HISTORY: 500,
         # Endpoint.ORDER_BOOK: 25,
         # Endpoint.CANDLE: 500,
@@ -215,7 +235,7 @@ class BitMEXRESTConverterV1(RESTConverter):
         # Error
         Error: {
             "name": "code",
-            "message": "message",
+            "message": "message"
         },
         # Data
         Trade: {
@@ -228,13 +248,13 @@ class BitMEXRESTConverterV1(RESTConverter):
         },
         MyTrade: {
             "symbol": ParamName.SYMBOL,
-            "timestamp": ParamName.TIMESTAMP,
+            "transactTime": ParamName.TIMESTAMP,
             "orderID": ParamName.ORDER_ID,
             "execID": ParamName.ITEM_ID,  # ?
-            "cumQty": ParamName.AMOUNT,  # ???
+            "lastQty": ParamName.AMOUNT,  # ???
             "avgPx": ParamName.PRICE,
             "side": ParamName.DIRECTION,
-            "commission": ParamName.FEE,
+            "execComm": ParamName.FEE,
             # "": ParamName.FEE_SYMBOL,
             # "": ParamName.REBATE,
         },
@@ -297,18 +317,17 @@ class BitMEXRESTConverterV1(RESTConverter):
         },
         BalanceTransaction: {
             "currency": ParamName.SYMBOL,
+            "address": ParamName.CURRENCY_PAIR,
             "transactTime": ParamName.TIMESTAMP,
             "transactID": ParamName.ITEM_ID,
             "transactType": ParamName.TRANSACTION_TYPE,
             "amount": ParamName.AMOUNT,
             "fee": ParamName.FEE,
-            # todo
-            # "transactStatus": ParamName.TRANSACTION_STATUS,
+            "transactStatus": ParamName.TRANSACTION_STATUS,
         },
         Order: {
             "symbol": ParamName.SYMBOL,
-            # "transactTime": ParamName.TIMESTAMP,  # choose?
-            "timestamp": ParamName.TIMESTAMP,
+            "transactTime": ParamName.TIMESTAMP,
             "orderID": ParamName.ITEM_ID,
             "clOrdID": ParamName.USER_ORDER_ID,
             "ordType": ParamName.ORDER_TYPE,
@@ -330,8 +349,7 @@ class BitMEXRESTConverterV1(RESTConverter):
             "isOpen": ParamName.IS_OPEN,
             "liquidationPrice": ParamName.PRICE_MARGIN_CALL,
             "avgEntryPrice": ParamName.PRICE_AVERAGE,
-            "unrealisedPnl": ParamName.PROFIT_N_LOSS,
-
+            "unrealisedPnl": ParamName.PNL,
             # Parsing order (Endpoint.POSITION_CLOSE)
             "leavesQty": ParamName.AMOUNT,
             # "posMargin" - amount in XBt
@@ -362,8 +380,10 @@ class BitMEXRESTConverterV1(RESTConverter):
     timestamp_platform_names = ["startTime", "endTime"]
 
     intervals_supported = [
-        CandleInterval.MIN_1, CandleInterval.MIN_5, CandleInterval.HRS_1,
-        CandleInterval.DAY_1
+        CandleInterval.MIN_1,
+        CandleInterval.MIN_5,
+        CandleInterval.HRS_1,
+        CandleInterval.DAY_1,
     ]
 
     # Convert to platform format
@@ -371,12 +391,12 @@ class BitMEXRESTConverterV1(RESTConverter):
     @staticmethod
     def _inject_filter(keyword_from, keyword_to, params):
         if keyword_from in params and params[keyword_from]:
-            if 'filter' not in params:
-                params['filter'] = '{}'
-            _filter = json.loads(params['filter'])
+            if "filter" not in params:
+                params["filter"] = "{}"
+            _filter = json.loads(params["filter"])
             _filter[keyword_to] = params[keyword_from]
             params.pop(keyword_from)
-            params['filter'] = json.dumps(_filter)
+            params["filter"] = json.dumps(_filter)
 
     def _convert_params_to_platform(self, params, endpoint):
         if endpoint in [Endpoint.ORDERS_ALL, Endpoint.TRADE_MY]:
@@ -401,11 +421,17 @@ class BitMEXRESTConverterV1(RESTConverter):
             self._inject_filter(ParamName.IS_OPEN, "open", params)
         elif endpoint == Endpoint.ORDER_CREATE:
             required = tuple(params.keys())
-            if params[ParamName.ORDER_TYPE] in (OrderType.STOP_MARKET,
-                                                OrderType.TAKE_PROFIT_MARKET):
-                required = (ParamName.AMOUNT, ParamName.PRICE_STOP,
-                            ParamName.DIRECTION, ParamName.SYMBOL,
-                            ParamName.ORDER_TYPE)
+            if params[ParamName.ORDER_TYPE] in (
+                    OrderType.STOP_MARKET,
+                    OrderType.TAKE_PROFIT_MARKET,
+            ):
+                required = (
+                    ParamName.AMOUNT,
+                    ParamName.PRICE_STOP,
+                    ParamName.DIRECTION,
+                    ParamName.SYMBOL,
+                    ParamName.ORDER_TYPE,
+                )
             params = {k: v for k, v in params.items() if k in required}
         return super()._convert_params_to_platform(params, endpoint)
 
@@ -416,7 +442,7 @@ class BitMEXRESTConverterV1(RESTConverter):
                 if name == ParamName.TO_ITEM:
                     # Make to_item an including param (for BitMEX it's excluding)
                     # maybe multiply?
-                    timestamp += (1000 if value.is_milliseconds else 1)
+                    timestamp += 1000 if value.is_milliseconds else 1
                 return timestamp
         return super()._process_param_value(name, value)
 
@@ -424,8 +450,8 @@ class BitMEXRESTConverterV1(RESTConverter):
         result = super()._parse_item(endpoint, item_data)
 
         # (For Trade)
-        if endpoint == Endpoint.TRADE and hasattr(
-                result, ParamName.SYMBOL) and result.symbol[0] == ".":
+        if (endpoint == Endpoint.TRADE and hasattr(result, ParamName.SYMBOL)
+                and result.symbol[0] == "."):
             # # ".ETHUSD" -> "ETHUSD"
             # result.symbol = result.symbol[1:]
             # https://www.bitmex.com/api/explorer/#!/Trade/Trade_get Please note
@@ -434,14 +460,32 @@ class BitMEXRESTConverterV1(RESTConverter):
             # a changing price.
             return None
 
-        if hasattr(result, ParamName.FEE) and result.fee and result.fee < 0:
-            result.fee = -result.fee
+        if endpoint == Endpoint.BALANCE_TRANSACTION:
+            if (hasattr(result, ParamName.FEE)
+                    and result.fee
+                    and result.fee < 0):
+                result.fee = -result.fee
+            if result.timestamp is None:
+                result.timestamp = time.time() * 1000
+            # Clear transfer addresses from currency_pair field
+            if result.transaction_type not in (TransactionType.REALISED_PNL, TransactionType.UNREALISED_PNL) \
+                    and result.currency_pair is not None:
+                result.currency_pair = None
+
+        if (endpoint == Endpoint.TRADE_MY
+                and hasattr(result, ParamName.FEE)
+                and result.fee
+                and result.fee < 0):
+            result.rebate = -result.fee
+            result.fee = None
+
         # Convert direction
         if result and hasattr(result,
                               ParamName.DIRECTION) and not result.direction:
             result.direction = None
             if isinstance(result, Position) and result.amount:
-                result.direction = Direction.BUY if result.amount > 0 else Direction.SELL
+                result.direction = (Direction.BUY
+                                    if result.amount > 0 else Direction.SELL)
                 if result.amount < 0:
                     result.amount = -result.amount
 
@@ -457,15 +501,17 @@ class BitMEXRESTConverterV1(RESTConverter):
             result = [item_data[ParamName.SYMBOL] for item_data in data]
             return result
         elif endpoint == Endpoint.ORDER_BOOK:
-            result = dict(asks=[(item['price'], item['size']) for item in data
-                                if item['side'] == 'Sell'],
-                          bids=[(item['price'], item['size']) for item in data
-                                if item['side'] == 'Buy'])
+            result = dict(
+                asks=[(item["price"], item["size"]) for item in data
+                      if item["side"] == "Sell"],
+                bids=[(item["price"], item["size"]) for item in data
+                      if item["side"] == "Buy"],
+            )
             result[ParamName.SYMBOL] = data[0][ParamName.SYMBOL]
             data = result
         elif endpoint == Endpoint.QUOTE:
             result = {
-                ParamName.ASKS if side['side'] == "Sell" else ParamName.BIDS:
+                ParamName.ASKS if side["side"] == "Sell" else ParamName.BIDS:
                 side[ParamName.PRICE]
                 for side in data
             }
@@ -477,7 +523,7 @@ class BitMEXRESTConverterV1(RESTConverter):
             error_data = error_data["error"]
             if "Maximum result count is" in error_data["message"]:
                 error_data["name"] = ErrorCode.WRONG_LIMIT
-        if error_data == '[]':
+        if error_data == "[]":
             # implicit failure from bitmex
             response = None
             error_data = {"name": ErrorCode.APP_ERROR}
@@ -487,19 +533,33 @@ class BitMEXRESTConverterV1(RESTConverter):
     def _convert_satoshi_to_xbt(self, item, item_data=None):
         # https://www.bitmex.com/app/restAPI "Обратите внимание: все суммы в биткойнах при
         # возврате запроса указываются в Satoshi: 1 XBt (Satoshi) = 0.00000001 XBT (биткойн)."
-        if isinstance(
-                item, Balance
-        ) and item and item.amount_available is not None and item_data:
+        def to_xbt_from_satoshi(val):
+            return val / Decimal('1e8')
+
+        if (isinstance(item, Balance) and item
+                and item.amount_available is not None and item_data):
             # marginBalance = walletBalance - unrealisedPnl
             total_amount = item_data.get("walletBalance")
             if total_amount is not None:
-                item.amount_reserved = total_amount - item.amount_available
+                item.amount_reserved = Decimal(total_amount) - item.amount_available
 
         if hasattr(item, ParamName.SYMBOL) and item.symbol == "XBt":
             for name in self.currency_param_names:
                 if hasattr(item, name) and getattr(item, name):
-                    setattr(item, name, getattr(item, name) / 100000000)
+                    satoshi_val = to_xbt_from_satoshi(getattr(item, name))
+                    setattr(item, name, satoshi_val)
             setattr(item, ParamName.SYMBOL, "XBT")
+
+        if isinstance(item, MyTrade):
+            for f in [ParamName.FEE, ParamName.REBATE]:
+                field_val = getattr(item, f)
+                if field_val is not None:
+                    setattr(item, f, to_xbt_from_satoshi(field_val))
+
+        if isinstance(item, Position):
+            field_val = getattr(item, ParamName.PNL, None)
+            if field_val is not None:
+                setattr(item, ParamName.PNL, to_xbt_from_satoshi(field_val))
 
     def _post_process_item(self, item, item_data=None):
         self._convert_satoshi_to_xbt(item, item_data)
@@ -509,15 +569,17 @@ class BitMEXRESTConverterV1(RESTConverter):
             item.bestbid = Decimal(item_data[ParamName.BIDS])
         return super()._post_process_item(item, item_data)
 
-    def _generate_and_add_signature(self,
-                                    method,
-                                    url,
-                                    endpoint,
-                                    platform_params,
-                                    headers,
-                                    api_key,
-                                    api_secret,
-                                    passphrase=None):
+    def _generate_and_add_signature(
+            self,
+            method,
+            url,
+            endpoint,
+            platform_params,
+            headers,
+            api_key,
+            api_secret,
+            passphrase=None,
+    ):
         # Add secure headers
         expires = generate_expires()
         headers["api-expires"] = str(expires)
@@ -542,14 +604,16 @@ class BitMEXRESTClient(PrivatePlatformRESTClient):
 
     IS_NONE_SYMBOL_FOR_ALL_SYMBOLS = True
 
-    supported_order_types = (OrderType.MARKET, OrderType.LIMIT,
-                             OrderType.STOP_LIMIT, OrderType.TAKE_PROFIT_LIMIT,
-                             OrderType.STOP_MARKET,
-                             OrderType.TAKE_PROFIT_MARKET)
+    supported_order_types = (
+        OrderType.MARKET,
+        OrderType.LIMIT,
+        OrderType.STOP_LIMIT,
+        OrderType.TAKE_PROFIT_LIMIT,
+        OrderType.STOP_MARKET,
+        OrderType.TAKE_PROFIT_MARKET,
+    )
 
-    _converter_class_by_version = {
-        "1": BitMEXRESTConverterV1,
-    }
+    _converter_class_by_version = {"1": BitMEXRESTConverterV1}
 
     wait_before_fetch_s = 2
 
@@ -578,23 +642,29 @@ class BitMEXRESTClient(PrivatePlatformRESTClient):
                     response.headers.get("x-ratelimit-remaining", -1))
                 reset_ratelimit_timestamp = int(
                     response.headers.get("x-ratelimit-reset", -1))
-                if ratelimit >= 0 and remaining_requests < ratelimit * 0.1 and reset_ratelimit_timestamp > 0:
-                    precision_sec = 1  # Current machine time may not precise which can cause ratelimit error
-                    self.delay_before_next_request_sec = reset_ratelimit_timestamp - time.time(
-                    ) + precision_sec
+                if (ratelimit >= 0 and remaining_requests < ratelimit * 0.1
+                        and reset_ratelimit_timestamp > 0):
+                    precision_sec = (
+                        1
+                    )  # Current machine time may not precise which can cause ratelimit error
+                    self.delay_before_next_request_sec = (
+                        reset_ratelimit_timestamp - time.time() +
+                        precision_sec)
                 else:
                     self.delay_before_next_request_sec = 0
                 self.logger.debug(
                     "Ratelimit info. remaining_requests: %s/%s delay: %s",
-                    remaining_requests, ratelimit,
-                    self.delay_before_next_request_sec)
+                    remaining_requests,
+                    ratelimit,
+                    self.delay_before_next_request_sec,
+                )
             except Exception as error:
                 self.logger.exception(
                     "Error while defining delay_before_next_request_sec.",
                     error)
 
     def fetch_quote(self, symbol: str = None, version: str = None, **kwargs):
-        kwargs['depth'] = 1
+        kwargs["depth"] = 1
         return super().fetch_quote(symbol=symbol, version=version, **kwargs)
 
     def fetch_symbols(self, version=None, **kwargs):
@@ -621,12 +691,49 @@ class BitMEXRESTClient(PrivatePlatformRESTClient):
             result = [result]
         return result
 
+    def fetch_history_offset(self,
+                             endpoint,
+                             symbol,
+                             limit=None,
+                             from_item=None,
+                             to_item=None,
+                             sorting=None,
+                             is_use_max_limit=False,
+                             from_time=None,
+                             to_time=None,
+                             version=None,
+                             offset=None,
+                             **kwargs):
+        # Common method for fetching history for any endpoint. Used in REST connector.
+
+        # (Convert endpoint to history endpoint if they differ)
+        history_endpoint_lookup = self.converter.history_endpoint_lookup
+        endpoint = (history_endpoint_lookup.get(endpoint, endpoint)
+                    if history_endpoint_lookup else endpoint)
+        params = {
+            ParamName.SYMBOL: symbol,
+            ParamName.LIMIT: limit,
+            ParamName.FROM_ITEM: from_item,
+            ParamName.TO_ITEM: to_item,
+            ParamName.SORTING: sorting,
+            ParamName.IS_USE_MAX_LIMIT: is_use_max_limit,
+            ParamName.FROM_TIME: from_time,
+            ParamName.TO_TIME: to_time,
+            ParamName.OFFSET: offset,
+        }
+
+        self.logger.debug("fetch_history from: %s to: %s", from_item
+                          or from_time, to_item or to_time)
+        result = self._send("GET", endpoint, params, version, **kwargs)
+        return result
+
     def cancel_order(self, order, symbol=None, version=None, **kwargs):
         if not order:
             return Error(
                 ErrorCode.WRONG_PARAM,
                 "Define order or order_id to be checked, "
-                "or Use fetch_orders() to get all orders.")
+                "or Use fetch_orders() to get all orders.",
+            )
         return super().cancel_order(order, symbol, version, **kwargs)
 
     def fetch_order(self, order_or_id, symbol=None, version=None, **kwargs):
@@ -635,7 +742,8 @@ class BitMEXRESTClient(PrivatePlatformRESTClient):
             return Error(
                 ErrorCode.WRONG_PARAM,
                 "Define order or order_id to be checked, "
-                "or Use fetch_orders() to get all orders.")
+                "or Use fetch_orders() to get all orders.",
+            )
         result = super().fetch_order(order_or_id, symbol, version, **kwargs)
         return result[0] if isinstance(result,
                                        list) and len(result) else result
@@ -669,8 +777,8 @@ class BitMEXRESTClient(PrivatePlatformRESTClient):
 
         if not symbol:
             positions = self.get_positions()
-            position_symbols = [p.symbol for p in positions if p.is_open
-                                ] if isinstance(positions, list) else None
+            position_symbols = ([p.symbol for p in positions if p.is_open]
+                                if isinstance(positions, list) else None)
             self.logger.info(
                 "close_all_positions -> Close position_symbols: %s",
                 position_symbols)
@@ -710,6 +818,9 @@ class BitMEXWSConverterV1(WSConverter):
     ]
     symbol_endpoints = supported_endpoints
 
+    symbols_not_supported_endpoints = [Endpoint.BALANCE, Endpoint.POSITION, Endpoint.BALANCE_CONVERTED,
+                                       Endpoint.ORDER]
+
     # # symbol_endpoints = ["execution", "instrument", "order", "orderBookL2", "position", "quote", "trade"]
     # # supported_endpoints = symbolSubs + ["margin"]
     # supported_endpoints = [Endpoint.TRADE]
@@ -724,7 +835,6 @@ class BitMEXWSConverterV1(WSConverter):
         "trade:{symbol}",
         Endpoint.TRADE_MY:
         "execution:{symbol}",
-
         # Endpoint.TRADE: lambda params: "trade:" + params[Param.SYMBOL] if Param.SYMBOL in params else "trade",
         Endpoint.CANDLE:
         "tradeBin{interval}",
@@ -753,13 +863,12 @@ class BitMEXWSConverterV1(WSConverter):
         # Error
         Error: {
             "status": "code",
-            "error": "message",
+            "error": "message"
         },
         # Data
         Candle: {
             "symbol": ParamName.SYMBOL,
             "timestamp": ParamName.TIMESTAMP,  # "closingTimestamp"
-
             # "": ParamName.INTERVAL,
             "open": ParamName.PRICE_OPEN,
             "high": ParamName.PRICE_HIGH,
@@ -813,10 +922,9 @@ class BitMEXWSConverterV1(WSConverter):
             "price": ParamName.PRICE,
         },
     }
-    param_lookup_by_class[MyTrade]['orderQty'] = ParamName.AMOUNT
     param_value_lookup = BitMEXRESTConverterV1.param_value_lookup.copy()
-    param_value_reversed_lookup = BitMEXRESTConverterV1.param_value_reversed_lookup.copy(
-    )
+    param_value_reversed_lookup = (
+        BitMEXRESTConverterV1.param_value_reversed_lookup.copy())
     param_value_lookup[ParamName.LEVEL] = {
         OrderBookDepthLevel.LIGHT:
         "L2_25",  # "10", - has completely different format
@@ -848,15 +956,13 @@ class BitMEXWSConverterV1(WSConverter):
     data = {}
     keys = {}
 
-    def find_by_keys(self, keys, table, matchData):
-        for item in table:
-            if all(item[k] == matchData[k] for k in keys):
-                return item
+    def create_key_for_item(self, item, table):
+        return tuple(item[k] for k in self.keys[table])
 
     def order_leaves_quantity(self, order):
-        if order['leavesQty'] is None:
+        if order["leavesQty"] is None:
             return True
-        return order['leavesQty'] > 0
+        return order["leavesQty"] > 0
 
     def handle_data_table(self, message):
         changed_items = []
@@ -865,8 +971,6 @@ class BitMEXWSConverterV1(WSConverter):
         if "subscribe" in message:
             self.logger.debug("Subscribed to %s." % message["subscribe"])
         elif action:
-            if table not in self.data:
-                self.data[table] = []
             # There are four possible actions from the WS:
             # "partial" - full table image
             # "insert"  - new row
@@ -874,55 +978,65 @@ class BitMEXWSConverterV1(WSConverter):
             # "delete"  - delete row
             if action == "partial":
                 self.logger.debug("%s: partial" % table)
-                self.data[table] += message["data"]
                 # Keys are communicated on partials to let you know how to uniquely identify
                 # an item. We use it for updates.
                 self.keys[table] = message["keys"]
+                if table not in self.data:
+                    self.data[table] = {} if message["keys"] else []
+                if isinstance(self.data[table], dict):
+                    for item in message["data"]:
+                        self.data[table][self.create_key_for_item(item, table)] = item
+                else:
+                    self.data[table] += message["data"]
             elif action == "insert":
                 self.logger.debug("%s: inserting %s" %
                                   (table, message["data"]))
-                self.data[table] += message["data"]
+                if isinstance(self.data[table], dict):
+                    for item in message["data"]:
+                        self.data[table][self.create_key_for_item(item, table)] = item
+                else:
+                    self.data[table] += message["data"]
 
                 # Limit the max length of the table to avoid excessive memory usage.
                 # Don't trim orders because we'll lose valuable state if we do.
-                if table not in [
-                        "order", "orderBookL2", "orderBookL2_25"
-                ] and len(self.data[table]) > self.MAX_TABLE_LEN:
-                    self.data[table] = self.data[table][int(self.
-                                                            MAX_TABLE_LEN /
-                                                            2):]
-            elif action == 'update':
-                self.logger.debug('%s: updating %s' % (table, message['data']))
+                if (table not in ["order", "orderBookL2", "orderBookL2_25"]
+                        and len(self.data[table]) > self.MAX_TABLE_LEN
+                        and isinstance(self.data[table], list)):
+                    self.data[table] = self.data[table][int(self.MAX_TABLE_LEN/2):]
+            elif action == "update":
+                self.logger.debug("%s: updating %s" % (table, message["data"]))
+                if isinstance(self.data[table], list):
+                    return
                 # Locate the item in the collection and update it.
-                for updateData in message['data']:
-                    item = self.find_by_keys(self.keys[table],
-                                             self.data[table], updateData)
+                for updateData in message["data"]:
+                    key = self.create_key_for_item(updateData, table)
+                    item = self.data[table].get(key)
                     if not item:
                         return  # No item found to update. Could happen before push
                     item.update(updateData)
                     changed_items.append(item)
                     # Remove cancelled / filled orders
-                    if table == 'order' and not self.order_leaves_quantity(
-                            item):
-                        self.data[table].remove(item)
+                    if table == "order" and not self.order_leaves_quantity(item):
+                        del self.data[table][key]
             elif action == "delete":
                 self.logger.debug("%s: deleting %s" % (table, message["data"]))
+                if isinstance(self.data[table], list):
+                    return
                 # Locate the item in the collection and remove it.
                 for deleteData in message["data"]:
-                    item = self.find_by_keys(self.keys[table],
-                                             self.data[table], deleteData)
-                    self.data[table].remove(item)
+                    key = self.create_key_for_item(deleteData, table)
+                    del self.data[table][key]
             else:
                 raise Exception("Unknown action: %s" % action)
         if changed_items:
-            message['data'] = changed_items
+            message["data"] = changed_items
 
-        not_to_skip = ['Trade', 'Settlement', 'Funding']
+        not_to_skip = ["Trade", "Settlement", "Funding"]
         if table and action:
-            for item in message['data']:
-                if message['table'] == 'execution' and item[
-                        'execType'] not in not_to_skip:
-                    message['data'] = None
+            for item in list(message["data"]):
+                if (message["table"] == "execution"
+                        and item["execType"] not in not_to_skip):
+                    message["data"].remove(item)
         return message
 
     def preprocess_data(self, data, subscription, endpoint, symbol, params):
@@ -946,7 +1060,9 @@ class BitMEXWSConverterV1(WSConverter):
                 if prev_items_data is None:
                     self.logger.warning(
                         "It is impossible order book update cannot be before snapshot! "
-                        "data: %s", data)
+                        "data: %s",
+                        data,
+                    )
                     return None
 
                 if action == "delete":
@@ -982,8 +1098,8 @@ class BitMEXWSConverterV1(WSConverter):
         return data
 
     def get_subscription_info(self, endpoint, data):
-        subscription = data.get(
-            self.subscription_param) if self.subscription_param else None
+        subscription = (data.get(self.subscription_param)
+                        if self.subscription_param else None)
         if subscription in (Endpoint.QUOTE, ):
             endpoint = self.endpoint_by_event_type.get(subscription)
         return super().get_subscription_info(endpoint, data)
@@ -1087,7 +1203,8 @@ class BitMEXWSConverterV1(WSConverter):
                               ParamName.DIRECTION) and not result.direction:
             result.direction = None
             if isinstance(result, Position) and result.amount:
-                result.direction = Direction.BUY if result.amount > 0 else Direction.SELL
+                result.direction = (Direction.BUY
+                                    if result.amount > 0 else Direction.SELL)
                 if result.amount < 0:
                     result.amount = -result.amount
 
@@ -1110,9 +1227,7 @@ class BitMEXWSClient(WSClient):
 
     ping_interval_sec = 5
 
-    _converter_class_by_version = {
-        "1": BitMEXWSConverterV1,
-    }
+    _converter_class_by_version = {"1": BitMEXWSConverterV1}
 
     _subscription_limit_by_endpoint = {Endpoint.TRADE: 50}
 
@@ -1133,15 +1248,12 @@ class BitMEXWSClient(WSClient):
             # To auth to the WS using an API key, we generate
             # a signature of a nonce and the WS API endpoint.
             expire = generate_expires()
-            result += [
-                "api-expires: " + str(expire),
-            ]
+            result += ["api-expires: " + str(expire)]
             if self._api_key and self._api_secret:
                 signature = generate_signature("GET", "/realtime", "", expire,
                                                self._api_secret)
                 result += [
-                    "api-signature: " + signature,
-                    "api-key: " + self._api_key,
+                    "api-signature: " + signature, "api-key: " + self._api_key
                 ]
         else:
             self.logger.info(
@@ -1172,7 +1284,8 @@ class BitMEXWSClient(WSClient):
         # (May be extracted to base class if one more platform needs it)
         endpoint = self.converter.endpoint_by_item_class.get(item.__class__)
         symbols = self.symbols_by_endpoint.get(endpoint)
-        if endpoint == Endpoint.TICKER and Endpoint.TICKER_ALL in self.symbols_by_endpoint:
+        if (endpoint == Endpoint.TICKER
+                and Endpoint.TICKER_ALL in self.symbols_by_endpoint):
             symbols = None
         # if hasattr(item, "symbol"):
         #     item.symbol = item.symbol.replace('XBT', 'BTC')

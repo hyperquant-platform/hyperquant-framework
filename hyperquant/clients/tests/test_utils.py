@@ -1,10 +1,10 @@
 import unittest
 
-from hyperquant.api import Platform, Sorting
+from hyperquant.api import Platform, Sorting, sort_items, filter_items_by_last_id
 from hyperquant.clients import Trade, Balance
 from hyperquant.clients.binance import BinanceRESTClient, BinanceWSClient
 from hyperquant.clients.bitmex import BitMEXRESTClient, BitMEXWSClient
-from hyperquant.clients.utils import create_rest_client, create_ws_client, sort_items, filter_items_by_last_id
+from hyperquant.clients.utils import create_rest_client, create_ws_client
 
 
 class TestCreateClient(unittest.TestCase):

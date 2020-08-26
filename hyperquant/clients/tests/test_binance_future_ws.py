@@ -1,61 +1,65 @@
 from unittest import skip
 
 from hyperquant.api import Endpoint, Platform
-from hyperquant.clients.binance import BinanceWSConverterV1
+from hyperquant.clients.binance_future import BinanceFutureWSConverterV1
 from hyperquant.clients.tests.test_init import (TestPrivateWSClient,
                                                 TestProtocolConverter,
                                                 TestWSClient)
-from hyperquant.clients.utils import create_ws_client
 
 
 class TestBinanceWSConverterV1(TestProtocolConverter):
-    converter_class = BinanceWSConverterV1
+    converter_class = BinanceFutureWSConverterV1
 
 
-class BinanceSettingsMixIn:
-    platform_id = Platform.BINANCE
-    pivot_symbol = "BTC"
-    testing_symbol = "ETHBTC"  # As more popular
-    testing_symbols = ["ETHBTC", "BNBBTC"]
-    # version = "1"
+class BinanceFutureSettingsMixIn:
+    platform_id = Platform.BINANCE_FUTURE
+    testing_symbols = ["BTCUSDT"]
+    pivot_symbol = "USDT"
+    testing_symbol = testing_symbols[0]
+    testing_order_symbol = testing_symbols[0]
+    testing_order_symbol2 = testing_symbols[0]
 
 
-class TestBinanceWSClientV1(BinanceSettingsMixIn, TestWSClient):
+class TestBinanceFutureWSClientV1(BinanceFutureSettingsMixIn, TestWSClient):
     def test_candle_4_channels__interval_as_list(self):
         super().test_candle_4_channels__interval_as_list()
 
     def test_trade_1_channel(self):
         super().test_trade_1_channel()
 
+    @skip('Currently only one Symbol on platform')
     def test_trade_2_channels(self):
         super().test_trade_2_channels()
 
     def test_candle_1_channel(self):
         super().test_candle_1_channel()
 
+    @skip('Currently only one Symbol on platform')
     def test_candle_2_channels(self):
         super().test_candle_2_channels()
 
     def test_ticker_1_channel(self):
         super().test_ticker_1_channel()
 
+    @skip('Currently only one Symbol on platform')
     def test_ticker_2_channels(self):
         super().test_ticker_2_channels()
 
-    @skip("see below")
+    @skip("No such endpoint")
     def test_ticker_all_channel(self):
-        # TODO что то там неправильно с эндпоинтами в клиенте, надо поправлять
         super().test_ticker_all_channel()
 
     def test_order_book_1_channel(self):
         super().test_order_book_1_channel()
 
+    @skip('Currently only one Symbol on platform')
     def test_order_book_2_channels(self):
         super().test_order_book_2_channels()
 
     def test_order_book_diff_1_channel(self):
         super().test_order_book_diff_1_channel()
 
+    @skip('Currently only one Symbol on platform')
     def test_order_book_diff_2_channels(self):
         super().test_order_book_diff_2_channels()
 
@@ -72,29 +76,22 @@ class TestBinanceWSClientV1(BinanceSettingsMixIn, TestWSClient):
     def test_restoring_connection_on_disconnect(self):
         super().test_restoring_connection_on_disconnect()
 
+    @skip('Nut supported by platform')
     def test_quote_1_channel(self):
         super().test_quote_1_channel()
 
-    def test_multi_subscriptions(self):
-        # client = create_ws_client(self.platform_id, version=self.version)
-        self.client.subscribe([Endpoint.TRADE], "ETHBTC")
-        self.client.subscribe([Endpoint.TRADE], "EOSUSDT")
-        self.client.subscribe([Endpoint.TRADE], "BNBUSDT")
-        self.client.subscribe([Endpoint.TRADE], "ETHUSDT")
-        self.client.subscribe([Endpoint.TRADE], "BTCUSDT")
-        self.assertEqual(len(self.client.current_subscriptions), 5)
-        self.waitAndAssertResults(
-            self.received_items,
-            [Endpoint.TRADE],
-            ["ETHBTC", "EOSUSDT", "BNBUSDT", "ETHUSDT", "BTCUSDT"],
-            client=self.client,
-            is_check_all_received=True,
-        )
 
+class TestBinanceFutureWSClientV1Private(BinanceFutureSettingsMixIn, TestPrivateWSClient):
 
-class TestBinanceWSClientV1Private(BinanceSettingsMixIn, TestPrivateWSClient):
     def test_balance_channel(self):
-        super().test_balance_channel()
+        # Binance futures doesn't push balance updater on orders
+        self._test_endpoint_channels(
+            [Endpoint.BALANCE],
+            [self.pivot_symbol],
+            self.assertBalanceIsValid,
+            is_auth=True,
+            make_trade=True,
+        )
 
     def test_position_channel(self):
         super().test_position_channel()
@@ -106,11 +103,8 @@ class TestBinanceWSClientV1Private(BinanceSettingsMixIn, TestPrivateWSClient):
         super().test_trade_my_channel()
 
     def test_unsubscribe_private_endpoint(self):
-        self._test_endpoint_channels(
-            [Endpoint.BALANCE],
-            [self.pivot_symbol],
-            self.assertBalanceIsValid,
-            is_auth=True,
-        )
+        self._test_endpoint_channels([Endpoint.BALANCE], [self.pivot_symbol],
+                                     self.assertBalanceIsValid,
+                                     is_auth=True, make_trade=True)
         self.client_authed.unsubscribe([Endpoint.BALANCE], [self.pivot_symbol])
         self.assertEqual(len(self.client_authed.current_subscriptions), 0)

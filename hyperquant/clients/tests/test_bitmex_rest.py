@@ -20,14 +20,18 @@ class BitMEXSettingsMixIn:
     testing_symbol = "XBTUSD"
     testing_symbol2 = "ETHUSD"
     testing_symbols = [
-        testing_symbol, testing_symbol2
+        testing_symbol,
+        testing_symbol2,
     ]  # BitMEX returns all symbols if symbol param is not specified
 
-    testing_order_symbol = "XBTUSD"  # Choose for testing orders because it has no commission
+    testing_order_symbol = (
+        "XBTUSD")  # Choose for testing orders because it has no commission
     # testing_order_symbol = "XRPM19"  # Choose for testing orders because it has no commission
     testing_order_symbol2 = "ETHUSD"
     buy_sell_amount = 1
     buy_sell_amount_for_second_symbol = buy_sell_amount
+    is_market_orders_possible_to_cancel = True
+
     # -is_limit_price_for_market_orders_available = True
 
     is_sorting_supported = True
@@ -185,7 +189,7 @@ class TestBitMEXRESTClientV1Private(BitMEXSettingsMixIn,
 
     def setUp(self):
         super().setUp()
-        time.sleep(5) # Make tests longer but try not to get rate limit
+        time.sleep(5)  # Make tests longer but try not to get rate limit
 
     def test_set_leverage(self):
         super().test_set_leverage()
@@ -243,7 +247,9 @@ class TestBitMEXRESTClientV1Private(BitMEXSettingsMixIn,
         symbols = [self.testing_symbol, "ETHUSD"]
 
         client.converter.secured_endpoints += [
-            "user/wallet", "user/walletHistory", "user/walletSummary"
+            "user/wallet",
+            "user/walletHistory",
+            "user/walletSummary",
         ]
         result1 = client._send("GET", "user/wallet")
         result2 = client._send("GET", "user/walletHistory")
@@ -272,7 +278,7 @@ class TestBitMEXRESTClientV1Private(BitMEXSettingsMixIn,
         result4_3 = client.fetch_balance_transactions(10, 3)
         result4_4 = client.fetch_balance_transactions(20, 1)
         test = result4_4 == result4_2 + result4_3
-        result4_5 = client.fetch_balance_transactions(is_only_by_user=True)
+        result4_5 = client.fetch_balance_transactions(is_direct=True)
 
         data0 = self._show_info(symbols)
 
@@ -296,7 +302,6 @@ class TestBitMEXRESTClientV1Private(BitMEXSettingsMixIn,
 
         data4 = self._show_info(symbols)
         # CHECK BALANCE CHANGED!!!!!!
-
 
     def _show_info(self, symbols=None):
         client = self.client_authed
@@ -322,10 +327,11 @@ class TestBitMEXRESTClientV1Private(BitMEXSettingsMixIn,
 
 class TestBitMEXRESTClientV1History(BitMEXSettingsMixIn,
                                     TestPlatformRESTClientHistory):
-    testing_symbols = None  # BitMEX returns data for all symbols if symbol param is not specified
+    testing_symbols = (
+        None
+    )  # BitMEX returns data for all symbols if symbol param is not specified
 
-
-    @unittest.skip('TODO first fix DESC sorting')
+    @unittest.skip("TODO first fix DESC sorting")
     def test_fetch_history_from_and_to_item(
             self,
             endpoint=Endpoint.TRADE,
@@ -344,7 +350,9 @@ class TestBitMEXRESTClientV1History(BitMEXSettingsMixIn,
 
     # todo return error in client
     # Or just stay empty list
-    def test_fetch_trades_errors(self, method_name="fetch_trades", is_auth=False):
+    def test_fetch_trades_errors(self,
+                                 method_name="fetch_trades",
+                                 is_auth=False):
         client = self.client_authed if is_auth else self.client
         # Wrong symbol
         result = getattr(client, method_name)(self.wrong_symbol)
@@ -357,26 +365,25 @@ class TestBitMEXRESTClientV1History(BitMEXSettingsMixIn,
             self.assertIsNotNone(result)
             self.assertEqual(result, [])
 
+    def test_fetch_trades_history(self, is_auth=False):
+        super().test_fetch_trades_history(is_auth)
 
-    def test_fetch_trades_history(self):
-        super().test_fetch_trades_history()
+    def test_fetch_trades_history_errors(self, is_auth=False):
+        super().test_fetch_trades_history_errors(is_auth)
 
-    def test_fetch_trades_history_errors(self):
-        super().test_fetch_trades_history_errors()
+    def test_fetch_trades_history_limit(self, is_auth=False):
+        super().test_fetch_trades_history_limit(is_auth)
 
-    def test_fetch_trades_history_limit(self):
-        super().test_fetch_trades_history_limit()
+    def test_fetch_trades_history_limit_is_too_big(self, is_auth=False):
+        super().test_fetch_trades_history_limit_is_too_big(is_auth)
 
-    def test_fetch_trades_history_limit_is_too_big(self):
-        super().test_fetch_trades_history_limit_is_too_big()
-
-    def test_fetch_trades_history_sorting(self):
-        super().test_fetch_trades_history_sorting()
+    def test_fetch_trades_history_sorting(self, is_auth=False):
+        super().test_fetch_trades_history_sorting(is_auth)
 
     def test_fetch_trades_is_same_as_first_history(self):
         super().test_fetch_trades_is_same_as_first_history()
 
-    @unittest.skip('TODO first fix DESC sorting')
+    @unittest.skip("TODO first fix DESC sorting")
     def test_fetch_trades_history_over_and_over(self, sorting=None):
         super().test_fetch_trades_history_over_and_over(sorting)
 

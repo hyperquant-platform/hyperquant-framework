@@ -1,24 +1,20 @@
-from operator import attrgetter
-
 import settings
-from hyperquant.api import ParamName, Platform, PlatformCredentials, Sorting
+from hyperquant.api import ParamName, Platform, PlatformCredentials
 from hyperquant.clients.binance import BinanceRESTClient, BinanceWSClient
+from hyperquant.clients.binance_future import BinanceFutureRESTClient, BinanceFutureWSClient
 from hyperquant.clients.bitmex import BitMEXRESTClient, BitMEXWSClient
 
-# temp
-# if not settings.configured:
-#     # todo add default credentials
-#     print("settings.configure() for clients")
-#     settings.configure(base)
 
 _rest_client_class_by_platform_id = {
     Platform.BINANCE: BinanceRESTClient,
     Platform.BITMEX: BitMEXRESTClient,
+    Platform.BINANCE_FUTURE: BinanceFutureRESTClient,
 }
 
 _ws_client_class_by_platform_id = {
     Platform.BINANCE: BinanceWSClient,
     Platform.BITMEX: BitMEXWSClient,
+    Platform.BINANCE_FUTURE: BinanceFutureWSClient,
 }
 
 # Cache of clients (may be private clients need also api_key key in lookup, not only platform_id)
@@ -76,7 +72,7 @@ def get_credentials_for(platform_id):
     credentials = settings.CREDENTIALS_BY_PLATFORM.get(platform_name.upper(),
                                                        (None, None))
     if len(credentials) != len(credentials_template):
-        raise Exception(
+        raise ValueError(
             f'Invalid credentials for {platform_name}. Expected {credentials_template}.'
         )
     return PlatformCredentials.to_common_with_passphrase(credentials)
@@ -179,32 +175,3 @@ def set_up_symbols_lookup_on_client(client, platform_id):
     for s, ps in platform_symbol_by_common_symbol.items():
         client.converter.param_value_lookup[ParamName.SYMBOL][s] = ps
         client.converter.param_value_reversed_lookup[ParamName.SYMBOL][ps] = s
-
-
-def check_items_order(items):
-    if not items or len(items) < 2:
-        return
-    if not isinstance(items, list):
-        return
-    if hasattr(items[-1], 'timestamp') and items[-1].timestamp:
-        if items[-1].timestamp > items[0].timestamp:
-            return Sorting.ASCENDING
-        elif items[-1].timestamp < items[0].timestamp:
-            return Sorting.DESCENDING
-
-
-def sort_items(items, sorting=Sorting.ASCENDING):
-    try:
-        if sorting == Sorting.ASCENDING:
-            return sorted(items, key=attrgetter('timestamp'))
-        else:
-            return sorted(items, key=attrgetter('timestamp'), reverse=True)
-    except (KeyError, TypeError, AttributeError, ValueError):
-        return items
-
-
-def filter_items_by_last_id(items, last_item):
-    try:
-        return items[items.index(last_item):]
-    except (KeyError, TypeError, AttributeError, ValueError):
-        return items

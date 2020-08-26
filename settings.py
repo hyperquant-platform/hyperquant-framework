@@ -5,4 +5,7 @@ CREDENTIALS_BY_PLATFORM = {
      "your_binance_secret"),
     "BITMEX": ("your_bitmex_api",
                "your_bitmex_secret"),
+    "BINANCEFUTURES":
+        ("your_binance_futures_api",
+         "your_binance_futures_secret"),
 }
